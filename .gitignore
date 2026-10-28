@@ -1,0 +1,14 @@
+# ผลคอมไพล์
+/target
+
+# เครื่องมือที่ดาวน์โหลดมาเอง (ใหญ่ ไม่เก็บใน git)
+/ffmpeg
+/whisper
+
+# ไฟล์ชั่วคราว / log
+*.log
+*-log.txt
+*.tmp
+.vscode/
+.idea/
+Thumbs.db

@@ -1,0 +1,3 @@
+# จัดรูปแบบโค้ด: cargo fmt
+max_width = 140
+use_small_heuristics = "Max"

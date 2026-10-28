@@ -1,0 +1,34 @@
+[package]
+name = "tadtor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "โปรแกรมตัดต่อวิดีโอที่เขียนด้วย Rust"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# ส่งเสียงพรีวิวออกลำโพง
+cpal = "0.18.2"
+# หน้าต่างโปรแกรม + UI (ใช้การ์ดจอผ่าน wgpu)
+eframe = "0.37"
+# หน้าต่างเลือกไฟล์ของ Windows
+rfd = "0.17"
+# บันทึกโปรเจกต์ / ตั้งค่า / ข้อความ MCP เป็น JSON
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# อ่านชื่อฟอนต์ที่ติดตั้งในเครื่อง (egui ใช้อยู่แล้ว ไม่ต้องดาวน์โหลดเพิ่ม)
+ttf-parser = "0.25"
+
+# ตอนคอมไพล์แบบ debug ให้ไลบรารีภายนอกเร็วขึ้น (โค้ดเราเองยังคอมไพล์ไว)
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# ฝังไอคอนลงไฟล์ .exe (build.rs)
+[build-dependencies]
+winresource = "0.1.34"
