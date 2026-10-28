@@ -6,7 +6,7 @@ use eframe::egui;
 
 use crate::core::fx::TextStyle;
 use crate::core::history::History;
-use crate::core::media::{MediaKind, MediaLibrary, MediaState};
+use crate::core::media::{MediaInfo, MediaKind, MediaLibrary, MediaState};
 use crate::core::project::Project;
 use crate::core::project_file;
 use crate::core::subtitles;
@@ -85,8 +85,10 @@ pub enum PendingAction {
 /// ประเภทคลิปที่คำสั่งต้องการ
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Want {
-    /// คลิปภาพ/วิดีโอในแทร็กหลัก
+    /// คลิปภาพ/วิดีโอในแทร็กหลักหรือแทร็กภาพซ้อน
     Visual,
+    /// คลิปในแทร็กหลัก (ทรานซิชัน)
+    Main,
     /// คลิปที่มีเสียง
     Sound,
     Text,
@@ -367,21 +369,27 @@ impl TadTorApp {
         }
     }
 
-    /// ใส่ไฟล์จากคลังสื่อลงไทม์ไลน์ (`main_index` = ลำดับในแทร็กหลัก, `audio_at` = เวลาในแทร็กเสียง)
-    pub fn add_to_timeline(&mut self, ctx: &egui::Context, path: &Path, main_index: Option<usize>, audio_at: Option<f64>) {
-        let Some(item) = self.library.get(path) else { return };
+    /// ไฟล์ในคลังสื่อที่พร้อมใช้ (ยังไม่พร้อม/ใช้ไม่ได้ = แจ้งผู้ใช้แล้วคืน None)
+    fn ready_media(&mut self, ctx: &egui::Context, path: &Path) -> Option<(MediaKind, String, PathBuf, MediaInfo)> {
+        let item = self.library.get(path)?;
         let info = match &item.state {
             MediaState::Ready(info) => info.clone(),
             MediaState::Probing => {
                 self.notify(ctx, "กำลังอ่านไฟล์ รอสักครู่แล้วลองใหม่");
-                return;
+                return None;
             }
             MediaState::Failed(e) => {
-                self.notify(ctx, format!("ใช้ไฟล์นี้ไม่ได้: {e}"));
-                return;
+                let msg = format!("ใช้ไฟล์นี้ไม่ได้: {e}");
+                self.notify(ctx, msg);
+                return None;
             }
         };
-        let (kind, name, path) = (item.kind, item.name.clone(), item.path.clone());
+        Some((item.kind, item.name.clone(), item.path.clone(), info))
+    }
+
+    /// ใส่ไฟล์จากคลังสื่อลงไทม์ไลน์ (`main_index` = ลำดับในแทร็กหลัก, `audio_at` = เวลาในแทร็กเสียง)
+    pub fn add_to_timeline(&mut self, ctx: &egui::Context, path: &Path, main_index: Option<usize>, audio_at: Option<f64>) {
+        let Some((kind, name, path, info)) = self.ready_media(ctx, path) else { return };
         let playhead = self.playhead;
         let id = self.edit(|tl| {
             let clip = tl.new_clip(path, name, kind, &info);
@@ -396,7 +404,57 @@ impl TadTorApp {
         self.selected_media = None;
     }
 
-    /// คลิปที่คำสั่งตัด/แยกจะทำงานด้วย: คลิปที่เลือก (ถ้าหัวเล่นอยู่บนคลิปนั้น) ไม่งั้นคลิปแทร็กหลักใต้หัวเล่น
+    /// วางวิดีโอ/รูปซ้อนบนแทร็กหลักที่เวลา `at`
+    pub fn add_overlay(&mut self, ctx: &egui::Context, path: &Path, at: f64) {
+        let Some((kind, name, path, info)) = self.ready_media(ctx, path) else { return };
+        if !kind.is_visual() {
+            self.notify(ctx, "ภาพซ้อนใช้ได้กับวิดีโอและรูปเท่านั้น");
+            return;
+        }
+        let id = self.edit(|tl| {
+            let clip = tl.new_clip(path, name, kind, &info);
+            tl.place_overlay(clip, at)
+        });
+        self.selected_clip = Some(id);
+        self.selected_media = None;
+    }
+
+    /// สลับคลิประหว่างแทร็กหลักกับแทร็กภาพซ้อน (ถ้าย้ายคลิปท้ายสุดของแทร็กหลักขึ้นไปซ้อน จะวางทับคลิปหลักที่มีอยู่แทนที่จะเลยไปท้ายสุด)
+    pub fn toggle_clip_overlay(&mut self, id: u64) {
+        let Some((from, _)) = self.timeline.find(id) else { return };
+        let Some(c) = self.timeline.clip(id).cloned() else { return };
+        match from {
+            TrackKind::Main => {
+                let rem_end = (self.timeline.main_end() - c.dur).max(0.0);
+                let at = if rem_end <= 1e-3 {
+                    0.0
+                } else if c.start >= rem_end - 1e-3 {
+                    if self.playhead < rem_end - 1e-3 {
+                        self.playhead
+                    } else {
+                        self.timeline.main.iter().rev().find(|m| m.id != id).map_or(0.0, |m| m.start.min((rem_end - c.dur).max(0.0)))
+                    }
+                } else {
+                    c.start
+                };
+                self.edit(|tl| tl.move_to_track(id, TrackKind::Overlay, at));
+                self.selected_clip = Some(id);
+                if let Some(moved) = self.timeline.clip(id) {
+                    if self.playhead < moved.start || self.playhead >= moved.end() {
+                        self.playhead = moved.start;
+                    }
+                }
+            }
+            TrackKind::Overlay => {
+                let at = c.start + c.dur / 2.0;
+                self.edit(|tl| tl.move_to_track(id, TrackKind::Main, at));
+                self.selected_clip = Some(id);
+            }
+            _ => {}
+        }
+    }
+
+    /// คลิปที่คำสั่งตัด/แยกจะทำงานด้วย: คลิปที่เลือก (ถ้าหัวเล่นอยู่บนคลิปนั้น) ไม่งั้นคลิปแทร็กหลักหรือภาพซ้อนใต้หัวเล่น
     fn target_clip(&self) -> Option<Clip> {
         let t = self.playhead;
         if let Some(c) = self.selected_clip.and_then(|id| self.timeline.clip(id)) {
@@ -404,7 +462,11 @@ impl TadTorApp {
                 return Some(c.clone());
             }
         }
-        self.timeline.clip_at(TrackKind::Main, t).filter(|c| c.contains(t)).cloned()
+        self.timeline
+            .clip_at(TrackKind::Main, t)
+            .or_else(|| self.timeline.clip_at(TrackKind::Overlay, t))
+            .filter(|c| c.contains(t))
+            .cloned()
     }
 
     pub fn split_at_playhead(&mut self, ctx: &egui::Context) {
@@ -458,7 +520,8 @@ impl TadTorApp {
         let track = c.as_ref().and_then(|c| self.timeline.find(c.id)).map(|f| f.0);
         let ok = match (&c, want) {
             (None, _) => false,
-            (Some(_), Want::Visual) => track == Some(TrackKind::Main),
+            (Some(_), Want::Visual) => track.is_some_and(TrackKind::is_visual),
+            (Some(_), Want::Main) => track == Some(TrackKind::Main),
             (Some(c), Want::Sound) => c.has_audio,
             (Some(_), Want::Text) => track.is_some_and(TrackKind::is_text),
         };
@@ -466,7 +529,8 @@ impl TadTorApp {
             return c;
         }
         let msg = match want {
-            Want::Visual => "เลือกคลิปวิดีโอ/รูปในแทร็กหลักก่อน",
+            Want::Visual => "เลือกคลิปวิดีโอ/รูปในไทม์ไลน์ก่อน",
+            Want::Main => "เลือกคลิปในแทร็กหลักก่อน",
             Want::Sound => "เลือกคลิปที่มีเสียงก่อน",
             Want::Text => "เลือกคลิปข้อความก่อน",
         };
@@ -671,7 +735,7 @@ impl TadTorApp {
         if self.playing {
             return;
         }
-        if self.timeline.main.is_empty() {
+        if self.timeline.is_empty() {
             self.preview_tex = None;
             self.grab_key = None;
             return;
@@ -743,7 +807,7 @@ impl TadTorApp {
                 self.timeline = file.timeline;
                 // ไฟล์ที่คลิปใช้อยู่แต่ไม่ได้อยู่ในคลังสื่อ ให้ใส่คลังด้วย (จะได้มีภาพย่อ)
                 let mut media = file.media;
-                for c in self.timeline.main.iter().chain(self.timeline.audio.iter()) {
+                for c in self.timeline.main.iter().chain(&self.timeline.overlay).chain(&self.timeline.audio) {
                     if !media.contains(&c.path) {
                         media.push(c.path.clone());
                     }
@@ -752,7 +816,14 @@ impl TadTorApp {
                 self.project_path = Some(path.to_path_buf());
                 self.dirty = false;
                 self.settings.remember(path);
-                let missing = self.timeline.main.iter().chain(self.timeline.audio.iter()).filter(|c| !c.path.exists()).count();
+                let missing = self
+                    .timeline
+                    .main
+                    .iter()
+                    .chain(&self.timeline.overlay)
+                    .chain(&self.timeline.audio)
+                    .filter(|c| !c.path.exists())
+                    .count();
                 if missing > 0 {
                     self.notify(ctx, format!("เปิดโปรเจกต์แล้ว แต่หาไฟล์ไม่เจอ {missing} คลิป (ถูกย้ายหรือลบ)"));
                 } else {

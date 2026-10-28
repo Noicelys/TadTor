@@ -140,7 +140,8 @@ fn push_input(inputs: &mut Vec<OsString>, seg: &Seg, fps: u32) {
 /// เลือกเวลาสิ้นสุดให้พรีวิวเปิดไฟล์พร้อมกันไม่เกิน `max_inputs` ไฟล์ (เปิดเยอะจะเริ่มเล่นช้า)
 pub fn preview_until(tl: &Timeline, from: f64, max_inputs: usize) -> f64 {
     let total = tl.duration();
-    let mut starts: Vec<f64> = tl.main.iter().chain(tl.audio.iter()).filter(|c| c.end() > from + 1e-4).map(|c| c.start.max(from)).collect();
+    let mut starts: Vec<f64> =
+        tl.main.iter().chain(&tl.overlay).chain(&tl.audio).filter(|c| c.end() > from + 1e-4).map(|c| c.start.max(from)).collect();
     starts.sort_by(f64::total_cmp);
     match starts.get(max_inputs) {
         Some(&s) if s > from + 0.5 => s.min(total),
@@ -209,8 +210,8 @@ fn effect_filter(e: Effect, k: f32) -> Option<String> {
     })
 }
 
-/// หมุน/กลับด้าน + ย่อขยายตามแบบวาง + ครอปส่วนที่ล้นจอ
-fn layout_pre(fx: &ClipFx, w: u32, h: u32) -> Vec<String> {
+/// หมุนทีละ 90° / กลับด้าน
+fn orient(fx: &ClipFx) -> Vec<String> {
     let mut v = Vec::new();
     match fx.rotate % 4 {
         1 => v.push("transpose=clock".to_owned()),
@@ -224,9 +225,21 @@ fn layout_pre(fx: &ClipFx, w: u32, h: u32) -> Vec<String> {
     if fx.flip_v {
         v.push("vflip".to_owned());
     }
+    v
+}
+
+/// ขนาดจอ × ซูม (ปัดเป็นเลขคู่)
+fn zoomed(fx: &ClipFx, w: u32, h: u32) -> (u32, u32) {
     let z = fx.zoom.clamp(0.1, 5.0);
     let even = |x: f32| ((x / 2.0).round() as u32).max(1) * 2;
-    let (zw, zh) = (even(w as f32 * z), even(h as f32 * z));
+    (even(w as f32 * z), even(h as f32 * z))
+}
+
+/// หมุน/กลับด้าน + ย่อขยายตามแบบวาง + ครอปส่วนที่ล้นจอ
+fn layout_pre(fx: &ClipFx, w: u32, h: u32) -> Vec<String> {
+    let mut v = orient(fx);
+    let z = fx.zoom.clamp(0.1, 5.0);
+    let (zw, zh) = zoomed(fx, w, h);
     v.push(match fx.fit {
         Fit::Contain => format!("scale={zw}:{zh}:force_original_aspect_ratio=decrease:force_divisible_by=2"),
         Fit::Cover => format!("scale={zw}:{zh}:force_original_aspect_ratio=increase:force_divisible_by=2"),
@@ -291,17 +304,36 @@ fn color_chain(fx: &ClipFx, lut: Option<&str>) -> Vec<String> {
     v
 }
 
+/// ตัดช่วงของคลิปจากไฟล์ขาเข้า ให้เวลาเริ่มที่ 0 และเฟรมเรตตรงกับงาน
+fn clip_start(seg: &Seg, fps: u32) -> Vec<String> {
+    vec![format!("trim=duration={}", num(seg.len)), "setpts=PTS-STARTPTS".to_owned(), format!("fps={fps}")]
+}
+
 /// ต่อสาย filter ภาพของคลิปหนึ่ง จาก `[k:v:0]` ไปเป็น `[out]`
 fn video_chain(chains: &mut Vec<String>, k: usize, seg: &Seg, spec: VideoSpec, out: &str) {
     let fx = &seg.clip.fx;
     let (w, h, fps) = (spec.width, spec.height, spec.fps);
-    let lut = fx.lut.as_ref().and_then(|p| std::fs::read(p).ok()).map(|b| stash("lut", "cube", &b));
-    let mut pre = vec![format!("trim=duration={}", num(seg.len)), "setpts=PTS-STARTPTS".to_owned(), format!("fps={fps}")];
+    let mut pre = clip_start(seg, fps);
     pre.extend(layout_pre(fx, w, h));
-    pre.extend(color_chain(fx, lut.as_deref()));
+    let post = vec![layout_pad(fx, w, h), "setsar=1".to_owned()];
+    look_chain(chains, &format!("c{k}"), format!("[{k}:v:0]"), pre, post, &format!("format=yuv420p,settb=1/{fps}"), fx, out);
+}
 
-    let tag = format!("c{k}");
-    let mut cur = format!("[{k}:v:0]");
+/// ฟิลเตอร์ / ปรับสี / ขอบมืด / เอฟเฟกต์ ของคลิป: `pre` ทำก่อนปรับสี, `post` ทำหลังปรับสีก่อนเอฟเฟกต์, `finish` ปิดท้าย
+#[allow(clippy::too_many_arguments)]
+fn look_chain(
+    chains: &mut Vec<String>,
+    tag: &str,
+    input: String,
+    mut pre: Vec<String>,
+    mut post: Vec<String>,
+    finish: &str,
+    fx: &ClipFx,
+    out: &str,
+) {
+    let lut = fx.lut.as_ref().and_then(|p| std::fs::read(p).ok()).map(|b| stash("lut", "cube", &b));
+    pre.extend(color_chain(fx, lut.as_deref()));
+    let mut cur = input;
     let mut step = 0;
     let mut next = |label_base: &str| {
         step += 1;
@@ -312,7 +344,7 @@ fn video_chain(chains: &mut Vec<String>, k: usize, seg: &Seg, spec: VideoSpec, o
     let preset = preset_filter(fx.filter);
     match preset {
         Some(p) if fx.filter_amount < 0.999 => {
-            let (a, b, f, o) = (next(&tag), next(&tag), next(&tag), next(&tag));
+            let (a, b, f, o) = (next(tag), next(tag), next(tag), next(tag));
             chains.push(format!("{cur}{},format=yuv444p,split{a}{b}", pre.join(",")));
             chains.push(format!("{b}{p},format=yuv444p{f}"));
             chains.push(format!("{a}{f}blend=all_mode=normal:all_opacity={:.3}{o}", fx.filter_amount.max(0.0)));
@@ -320,28 +352,27 @@ fn video_chain(chains: &mut Vec<String>, k: usize, seg: &Seg, spec: VideoSpec, o
         }
         Some(p) => {
             pre.push(p.to_owned());
-            let o = next(&tag);
+            let o = next(tag);
             chains.push(format!("{cur}{}{o}", pre.join(",")));
             cur = o;
         }
         None => {
-            let o = next(&tag);
+            let o = next(tag);
             chains.push(format!("{cur}{}{o}", pre.join(",")));
             cur = o;
         }
     }
 
-    let mut post = vec![layout_pad(fx, w, h), "setsar=1".to_owned()];
     if fx.vignette > 1e-3 {
         post.push(format!("vignette=angle={:.3}", 0.15 + fx.vignette * 0.75));
     }
     match effect_filter(fx.effect, fx.effect_amount) {
         // เอฟเฟกต์ที่แยกสายในตัว (มี ;) ต้องต่อเป็นขั้นแยก
         Some(e) if e.contains(';') => {
-            let o = next(&tag);
+            let o = next(tag);
             chains.push(format!("{cur}{}{o}", post.join(",")));
             let e = e.replace("[g", &format!("[{tag}g"));
-            let o2 = next(&tag);
+            let o2 = next(tag);
             chains.push(format!("{o}{e}{o2}"));
             cur = o2;
             post = Vec::new();
@@ -349,9 +380,53 @@ fn video_chain(chains: &mut Vec<String>, k: usize, seg: &Seg, spec: VideoSpec, o
         Some(e) => post.push(e),
         None => {}
     }
-    post.push("format=yuv420p".to_owned());
-    post.push(format!("settb=1/{fps}"));
+    post.push(finish.to_owned());
     chains.push(format!("{cur}{}{out}", post.join(",")));
+}
+
+/// ภาพซ้อนหนึ่งคลิป จาก `[k:v:0]` ไปเป็น `[out]` (ภาพที่มีพื้นใสเช่น PNG ยังใสอยู่)
+/// เวลาของภาพถูกเลื่อนไปตรงตำแหน่งบนไทม์ไลน์ ผู้เรียกเอาไป `overlay` ทับภาพหลักได้เลย
+fn overlay_chain(chains: &mut Vec<String>, k: usize, seg: &Seg, spec: VideoSpec, out: &str) {
+    let fx = &seg.clip.fx;
+    let fps = spec.fps;
+    let tag = format!("o{k}");
+    let (zw, zh) = zoomed(fx, spec.width, spec.height);
+    let mut pre = clip_start(seg, fps);
+    pre.extend(orient(fx));
+    pre.push(format!("scale={zw}:{zh}:force_original_aspect_ratio=decrease:force_divisible_by=2"));
+    // ช่องโปร่งใสแยกไปอีกสาย เพราะฟิลเตอร์ปรับสีหลายตัวทิ้งช่องโปร่งใส แล้วค่อยรวมกลับตอนท้าย
+    chains.push(format!("[{k}:v:0]{},format=yuva420p,split[{tag}p][{tag}a]", pre.join(",")));
+    let mirror = if fx.effect == Effect::Mirror { ",hflip" } else { "" };
+    chains.push(format!("[{tag}a]alphaextract{mirror}[{tag}m]"));
+    let rgb = format!("[{tag}c]");
+    look_chain(chains, &tag, format!("[{tag}p]"), vec!["setsar=1".to_owned()], vec!["setsar=1".to_owned()], "format=yuv420p", fx, &rgb);
+
+    // เฟด/ความทึบคิดตามเวลาในคลิป (ช่วงอาจเริ่มกลางคลิป) แล้วค่อยเลื่อนไปเวลาบนไทม์ไลน์
+    let mut f = vec![format!("{rgb}[{tag}m]alphamerge"), format!("setpts=PTS-STARTPTS+{}/TB", num(seg.clip_offset()))];
+    if fx.fade_in > 1e-3 {
+        f.push(format!("fade=t=in:st=0:d={}:alpha=1", num(fx.fade_in)));
+    }
+    if fx.fade_out > 1e-3 {
+        f.push(format!("fade=t=out:st={}:d={}:alpha=1", num(seg.clip.dur - fx.fade_out), num(fx.fade_out)));
+    }
+    let opacity = fx.opacity.clamp(0.0, 1.0);
+    if opacity < 0.999 {
+        f.push(format!("lut=a='val*{opacity:.3}'"));
+    }
+    f.push(format!("settb=1/{fps}"));
+    f.push(format!("setpts=PTS-STARTPTS+{}/TB{out}", num(seg.offset)));
+    chains.push(f.join(","));
+}
+
+/// วางภาพซ้อนทับ `base` ตามตำแหน่ง (pan) เฉพาะช่วงเวลาของคลิป
+fn overlay_onto(base: &str, ov: &str, seg: &Seg, out: &str) -> String {
+    let px = (1.0 + seg.clip.fx.pan_x.clamp(-1.0, 1.0)) / 2.0;
+    let py = (1.0 + seg.clip.fx.pan_y.clamp(-1.0, 1.0)) / 2.0;
+    format!(
+        "{base}{ov}overlay=x='(W-w)*{px:.4}':y='(H-h)*{py:.4}':eof_action=pass:enable='between(t,{},{})'{out}",
+        num(seg.offset),
+        num(seg.offset + seg.len)
+    )
 }
 
 fn xfade_name(k: TransitionKind) -> &'static str {
@@ -640,16 +715,34 @@ pub fn build(tl: &Timeline, from: f64, until: f64, video: Option<VideoSpec>, aud
         }
     }
 
-    // ---- แทร็กหลัก: เสียง (ใช้ช่วง [from, until) ตรง ๆ) ----
-    if let Some(rate) = audio_rate.filter(|_| !tl.main_muted) {
-        for seg in segments(&tl.main, from, until) {
+    // ---- ภาพซ้อน ----
+    let overlays: &[Clip] = if tl.overlay_hidden { &[] } else { &tl.overlay };
+    let vover = segments(overlays, r0, r1);
+    let mut olabels: Vec<(String, &Seg)> = Vec::new();
+    if let Some(spec) = video {
+        for (i, seg) in vover.iter().enumerate() {
+            push_input(&mut inputs, seg, fps);
+            let k = n_inputs;
+            n_inputs += 1;
+            let out = format!("[ov{i}]");
+            overlay_chain(&mut chains, k, seg, spec, &out);
+            olabels.push((out, seg));
+        }
+    }
+
+    // ---- แทร็กหลัก + ภาพซ้อน: เสียง (ใช้ช่วง [from, until) ตรง ๆ) ----
+    if let Some(rate) = audio_rate {
+        let main = if tl.main_muted { Vec::new() } else { segments(&tl.main, from, until) };
+        for (seg, trans) in
+            main.iter().map(|s| (s, trans_of(s.clip))).chain(segments(overlays, from, until).iter().map(|s| (s, (0.0, 0.0))))
+        {
             if !seg.clip.has_audio {
                 continue;
             }
-            push_input(&mut inputs, &seg, fps);
+            push_input(&mut inputs, seg, fps);
             let k = n_inputs;
             n_inputs += 1;
-            audio_labels.push(audio_chain(&mut chains, k, &seg, rate, trans_of(seg.clip)));
+            audio_labels.push(audio_chain(&mut chains, k, seg, rate, trans));
         }
     }
 
@@ -703,6 +796,12 @@ pub fn build(tl: &Timeline, from: f64, until: f64, video: Option<VideoSpec>, aud
                 }
             }
         };
+
+        for (i, (label, seg)) in olabels.iter().enumerate() {
+            let out = format!("[vov{i}]");
+            chains.push(overlay_onto(&base, label, seg, &out));
+            base = out;
+        }
 
         // ---- ข้อความ + ซับไตเติล ----
         let mut texts = Vec::new();
@@ -801,6 +900,32 @@ mod tests {
         // เสียงคลิปแรกต้องเฟดออกตอนทรานซิชัน
         let g = build(&tl, 0.0, 12.0, None, Some(48000));
         assert!(g.filter.contains("volume='1.0000*min(1,max(0,(10.000000-t-0.000000)/1.000000))'"), "{}", g.filter);
+    }
+
+    #[test]
+    fn overlay_composites_on_main() {
+        let mut tl = sample();
+        let mut pic = tl.new_clip("logo.png".into(), "logo".into(), MediaKind::Image, &info(0.0, false));
+        pic.fx = ClipFx { fade_in: 1.0, opacity: 0.5, pan_x: 1.0, ..ClipFx::default() };
+        tl.place_overlay(pic, 2.0);
+        let pip = tl.new_clip("pip.mp4".into(), "pip".into(), MediaKind::Video, &info(10.0, true));
+        tl.place_overlay(pip, 8.0);
+        let spec = VideoSpec { width: 640, height: 360, fps: 30 };
+
+        // ขอภาพตั้งแต่ 3 วิ: รูปเริ่มกลางคลิป (เฟดคิดจากหัวคลิป) แล้วเลื่อนไปวางที่ 0
+        let g = build(&tl, 3.0, 12.0, Some(spec), Some(48000));
+        let f = &g.filter;
+        assert!(f.contains("scale=320:180:force_original_aspect_ratio=decrease"), "{f}");
+        assert!(f.contains("alphamerge,setpts=PTS-STARTPTS+1.000000/TB,fade=t=in:st=0:d=1.000000:alpha=1,lut=a='val*0.500'"), "{f}");
+        assert!(f.contains("[ov0]overlay=x='(W-w)*1.0000':y='(H-h)*0.5000':eof_action=pass:enable='between(t,0.000000,4.000000)'"), "{f}");
+        assert!(f.contains("setpts=PTS-STARTPTS+5.000000/TB[ov1]"), "{f}");
+        // ภาพซ้อนอยู่ใต้ข้อความ ตัดท้ายด้วย [vout] และเสียงของวิดีโอซ้อนถูกมิกซ์ด้วย
+        assert!(f.contains("[vov1]trim=start="), "{f}");
+        assert!(f.contains("amix=inputs=4"), "{f}");
+
+        tl.overlay_hidden = true;
+        let g = build(&tl, 3.0, 12.0, Some(spec), Some(48000));
+        assert!(!g.filter.contains("overlay=") && g.filter.contains("amix=inputs=3"), "{}", g.filter);
     }
 
     #[test]

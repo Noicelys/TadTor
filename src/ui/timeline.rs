@@ -18,13 +18,24 @@ const HANDLE_W: f32 = 8.0;
 const SNAP_PX: f32 = 8.0;
 
 const CLIP_VIDEO: Color32 = Color32::from_rgb(0x1d, 0x3f, 0x47);
+const CLIP_OVERLAY: Color32 = Color32::from_rgb(0x2b, 0x35, 0x5e);
 const CLIP_AUDIO: Color32 = Color32::from_rgb(0x1f, 0x45, 0x33);
 const WAVE: Color32 = Color32::from_rgb(0x5f, 0xd3, 0x95);
 const CLIP_TEXT: Color32 = Color32::from_rgb(0x4a, 0x2f, 0x6b);
 const CLIP_SUB: Color32 = Color32::from_rgb(0x5c, 0x40, 0x1c);
 
-fn lane_height(kind: TrackKind) -> f32 {
+const OVERLAY_ROW_H: f32 = 36.0;
+const OVERLAY_ROW_GAP: f32 = 3.0;
+
+fn lane_height(kind: TrackKind, overlay_rows: usize) -> f32 {
     match kind {
+        TrackKind::Overlay => {
+            if overlay_rows <= 1 {
+                44.0
+            } else {
+                overlay_rows as f32 * OVERLAY_ROW_H + (overlay_rows - 1) as f32 * OVERLAY_ROW_GAP
+            }
+        }
         TrackKind::Main => 64.0,
         TrackKind::Text | TrackKind::Subtitle => 28.0,
         TrackKind::Audio => 44.0,
@@ -183,19 +194,27 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
     let x_to_time = |x: f32| ((x - lanes_left + scroll_x) / pps).max(0.0) as f64;
 
     // ---- พื้นที่แต่ละส่วน ----
+    let (cur_ov_rows, ov_clip_rows) = app.timeline.overlay_rows();
+    let orig_ov_rows = app.drag_origin.as_ref().map_or(1, |o| o.overlay_rows().0);
+    let total_ov_rows = cur_ov_rows.max(orig_ov_rows);
+
     let ruler = Rect::from_min_max(Pos2::new(lanes_left, full.top()), Pos2::new(full.right(), full.top() + RULER_H));
     let mut y = ruler.bottom() + 10.0;
     let lanes: Vec<(TrackKind, Rect)> = TrackKind::ALL
         .into_iter()
         .map(|k| {
-            let r = Rect::from_min_max(Pos2::new(lanes_left, y), Pos2::new(full.right() - 8.0, y + lane_height(k)));
+            let r = Rect::from_min_max(Pos2::new(lanes_left, y), Pos2::new(full.right() - 8.0, y + lane_height(k, total_ov_rows)));
             y = r.bottom() + TRACK_GAP;
             (k, r)
         })
         .collect();
     let lane_of = |k: TrackKind| lanes.iter().find(|l| l.0 == k).unwrap().1;
     let main_lane = lane_of(TrackKind::Main);
+    let overlay_lane = lane_of(TrackKind::Overlay);
     let audio_lane = lane_of(TrackKind::Audio);
+    // ลากคลิป/ไฟล์ภาพ: เหนือแทร็กหลักขึ้นไป = แทร็กภาพซ้อน
+    let over_overlay = |p: Pos2| p.y < main_lane.top() - TRACK_GAP / 2.0;
+    let over_main = |p: Pos2| !over_overlay(p) && p.y <= main_lane.bottom() + TRACK_GAP / 2.0;
     let lanes_clip = Rect::from_min_max(Pos2::new(lanes_left, full.top()), full.max);
     let lp = painter.with_clip_rect(lanes_clip);
 
@@ -242,6 +261,7 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
     for &(kind, lane) in &lanes {
         if track_header(app, ui, &painter, full.left(), lane, kind) {
             app.edit(|tl| match kind {
+                TrackKind::Overlay => tl.overlay_hidden = !tl.overlay_hidden,
                 TrackKind::Main => tl.main_muted = !tl.main_muted,
                 TrackKind::Audio => tl.audio_muted = !tl.audio_muted,
                 TrackKind::Text => tl.text_hidden = !tl.text_hidden,
@@ -261,6 +281,7 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
         );
     }
     for (kind, hint) in [
+        (TrackKind::Overlay, "ภาพซ้อน: ลากวิดีโอ/รูปมาวางที่นี่เพื่อซ้อนบนแทร็กหลัก (ซ้อนทับกันได้หลายชั้น)"),
         (TrackKind::Text, "เพิ่มข้อความจากแท็บ \"ข้อความ\" ด้านซ้าย"),
         (TrackKind::Subtitle, "ซับไตเติล: สร้างอัตโนมัติหรือนำเข้า .srt จากแท็บ \"ข้อความ\""),
         (TrackKind::Audio, "ไฟล์เพลง/เสียงจะมาอยู่แทร็กนี้"),
@@ -283,14 +304,37 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
     let pointer = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()));
     let pointer_t = pointer.map(|p| x_to_time(p.x));
     let snap_tol = (SNAP_PX / pps) as f64;
-    let mut main_ghost: Option<(Clip, f32)> = None;
+    // คลิปแทร็กหลัก/ภาพซ้อนที่กำลังลากข้ามแทร็ก: (คลิป, x, แทร็กที่จะไปลง)
+    let mut main_ghost: Option<(Clip, f32, TrackKind)> = None;
+    // คลิปภาพซ้อนที่กำลังลากลงแทร็กหลัก
+    let mut overlay_to_main = false;
+    let mut context_toggle_overlay: Option<u64> = None;
+    let mut context_split: Option<u64> = None;
+    let mut context_delete: Option<u64> = None;
+
+    let dragging_visual_media = egui::DragAndDrop::payload::<MediaDrag>(&ctx)
+        .is_some_and(|p| app.library.get(&p.path).is_some_and(|it| it.kind.is_visual()));
+    let dragging_visual_clip = drag.is_some_and(|d| d.track.is_visual() && d.mode == DragMode::Move);
+    if dragging_visual_media || dragging_visual_clip {
+        let hovered = pointer.is_some_and(&over_overlay);
+        let stroke_col = if hovered { theme::ACCENT } else { theme::ACCENT.gamma_multiply(0.45) };
+        super::dashed_rect(&lp, overlay_lane.shrink(1.0), stroke_col);
+    }
 
     for &(kind, lane) in &lanes {
         let clips = app.timeline.track(kind).clone();
-        for c in &clips {
+        for (clip_idx, c) in clips.iter().enumerate() {
+            let (c_top, c_bottom) = if kind == TrackKind::Overlay && total_ov_rows > 1 {
+                let r = ov_clip_rows.get(clip_idx).copied().unwrap_or(0).min(total_ov_rows - 1);
+                let vis_row = total_ov_rows - 1 - r;
+                let top = lane.top() + vis_row as f32 * (OVERLAY_ROW_H + OVERLAY_ROW_GAP);
+                (top, top + OVERLAY_ROW_H)
+            } else {
+                (lane.top(), lane.bottom())
+            };
             let rect = Rect::from_min_max(
-                Pos2::new(time_to_x(c.start) + 1.0, lane.top()),
-                Pos2::new((time_to_x(c.end()) - 1.0).max(time_to_x(c.start) + 3.0), lane.bottom()),
+                Pos2::new(time_to_x(c.start) + 1.0, c_top),
+                Pos2::new((time_to_x(c.end()) - 1.0).max(time_to_x(c.start) + 3.0), c_bottom),
             );
             let vis = rect.intersect(lanes_clip);
             let this_drag = drag.filter(|d| d.id == c.id);
@@ -308,6 +352,35 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
             let tail = ui
                 .interact(tail_r, egui::Id::unique(("clip_tail", c.id)), Sense::drag())
                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+            body.context_menu(|ui| {
+                app.selected_clip = Some(c.id);
+                app.selected_media = None;
+                if kind == TrackKind::Main {
+                    if ui.button(format!("{} ย้ายไปซ้อนบนภาพ (แทร็กภาพซ้อน)", icons::IMAGE)).clicked() {
+                        context_toggle_overlay = Some(c.id);
+                        ui.close();
+                    }
+                    ui.separator();
+                } else if kind == TrackKind::Overlay {
+                    if ui.button(format!("{} ย้ายลงแทร็กหลัก", icons::FILM_STRIP)).clicked() {
+                        context_toggle_overlay = Some(c.id);
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if ui
+                    .add_enabled(c.contains(app.playhead), egui::Button::new(format!("{} แยกคลิปที่หัวเล่น (Ctrl+B)", icons::SCISSORS)))
+                    .clicked()
+                {
+                    context_split = Some(c.id);
+                    ui.close();
+                }
+                if ui.button(format!("{} ลบคลิป (Delete)", icons::TRASH)).clicked() {
+                    context_delete = Some(c.id);
+                    ui.close();
+                }
+            });
 
             // ---- เริ่มลาก ----
             let started =
@@ -349,20 +422,38 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
                             }
                             tl.trim_tail(d.id, delta);
                         }
+                        DragMode::Move if d.track == TrackKind::Overlay && pointer.is_some_and(over_main) => {
+                            // ยังไม่ย้ายจริง วาดคลิปลอยและเส้นบอกตำแหน่งแทรก ปล่อยแล้วค่อยแทรกลงแทร็กหลัก
+                            overlay_to_main = true;
+                            let x = time_to_x((d.orig_start + delta).max(0.0));
+                            main_ghost = Some((c.clone(), x, TrackKind::Main));
+                        }
                         DragMode::Move if d.track != TrackKind::Main => {
                             let len = d.orig_end - d.orig_start;
-                            let mut s = d.orig_start + delta;
+                            let mut s = (d.orig_start + delta).max(0.0);
                             if let Some(v) = snap(s, &targets, snap_tol) {
                                 s = v;
                             } else if let Some(v) = snap(s + len, &targets, snap_tol) {
-                                s = v - len;
+                                s = (v - len).max(0.0);
                             }
                             tl.move_free(d.id, s);
                         }
                         DragMode::Move => {
                             // แทร็กหลัก: ยังไม่ย้ายจริง แค่วาดคลิปลอยตามเมาส์ ปล่อยแล้วค่อยแทรก
-                            let x = time_to_x(d.orig_start + delta);
-                            main_ghost = Some((c.clone(), x));
+                            let len = d.orig_end - d.orig_start;
+                            let mut s = (d.orig_start + delta).max(0.0);
+                            let to = if pointer.is_some_and(over_overlay) {
+                                if let Some(v) = snap(s, &targets, snap_tol) {
+                                    s = v;
+                                } else if let Some(v) = snap(s + len, &targets, snap_tol) {
+                                    s = (v - len).max(0.0);
+                                }
+                                TrackKind::Overlay
+                            } else {
+                                TrackKind::Main
+                            };
+                            let x = time_to_x(s);
+                            main_ghost = Some((c.clone(), x, to));
                         }
                     }
                     if tl != app.timeline {
@@ -377,8 +468,28 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
             if let (Some(d), true) = (active, stopped) {
                 if d.mode == DragMode::Move && d.track == TrackKind::Main {
                     if let (Some(p), Some(origin)) = (pointer, app.drag_origin.as_ref()) {
-                        let to = origin.main.iter().filter(|o| time_to_x((o.start + o.end()) / 2.0) < p.x).count();
-                        app.timeline.move_main(d.id, to);
+                        if over_overlay(p) {
+                            let targets: Vec<f64> = std::iter::once(0.0)
+                                .chain(std::iter::once(app.playhead))
+                                .chain(origin.all_clips().filter(|o| o.id != d.id).flat_map(|o| [o.start, o.end()]))
+                                .collect();
+                            let len = d.orig_end - d.orig_start;
+                            let mut at = pointer_t.map_or(d.orig_start, |pt| (d.orig_start + pt - d.press_t).max(0.0));
+                            if let Some(v) = snap(at, &targets, snap_tol) {
+                                at = v;
+                            } else if let Some(v) = snap(at + len, &targets, snap_tol) {
+                                at = (v - len).max(0.0);
+                            }
+                            app.timeline.move_to_track(d.id, TrackKind::Overlay, at);
+                        } else {
+                            let to = origin.main.iter().filter(|o| time_to_x((o.start + o.end()) / 2.0) < p.x).count();
+                            app.timeline.move_main(d.id, to);
+                        }
+                    }
+                }
+                if d.mode == DragMode::Move && d.track == TrackKind::Overlay {
+                    if let Some(p) = pointer.filter(|p| over_main(*p)) {
+                        app.timeline.move_to_track(d.id, TrackKind::Main, x_to_time(p.x));
                     }
                 }
                 app.end_drag();
@@ -386,7 +497,7 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
             }
 
             let selected = app.selected_clip == Some(c.id);
-            let ghosted = main_ghost.as_ref().is_some_and(|(g, _)| g.id == c.id);
+            let ghosted = main_ghost.as_ref().is_some_and(|(g, _, _)| g.id == c.id);
             if !ghosted {
                 draw_clip(app, &lp, rect, c, selected, kind, pps);
             } else {
@@ -395,22 +506,40 @@ fn tracks(app: &mut TadTorApp, ui: &mut egui::Ui) {
         }
     }
 
+    if let Some(id) = context_toggle_overlay {
+        app.toggle_clip_overlay(id);
+    }
+    if let Some(id) = context_split {
+        app.selected_clip = Some(id);
+        app.split_at_playhead(&ctx);
+    }
+    if let Some(id) = context_delete {
+        app.selected_clip = Some(id);
+        app.delete_selected();
+    }
+
     if main_ghost.is_none() {
         transition_markers(app, ui, &lp, main_lane, lanes_clip, &time_to_x);
     }
 
-    // ลากคลิปหลักอยู่: วาดคลิปลอย + เส้นบอกตำแหน่งที่จะแทรก
-    if let (Some((c, x)), Some(p)) = (&main_ghost, pointer) {
+    // ลากคลิปหลัก/ภาพซ้อนอยู่: วาดคลิปลอย + เส้นบอกตำแหน่งที่จะแทรก (หรือลอยในแทร็กภาพซ้อน)
+    if let (Some((c, x, to)), Some(p)) = (&main_ghost, pointer) {
         let w = (c.dur as f32 * pps).max(3.0);
-        let r = Rect::from_min_size(Pos2::new(*x, main_lane.top() - 4.0), egui::vec2(w, main_lane.height()));
-        let marker = insertion_x(app, p.x, &time_to_x);
-        draw_marker(&lp, marker, main_lane);
-        draw_clip(app, &lp, r, c, true, TrackKind::Main, pps);
+        let lane = lane_of(*to);
+        let gh = if *to == TrackKind::Overlay && total_ov_rows > 1 { OVERLAY_ROW_H } else { lane.height() };
+        let r = Rect::from_min_size(Pos2::new(*x, lane.top() - 4.0), egui::vec2(w, gh));
+        if *to == TrackKind::Main {
+            draw_marker(&lp, insertion_x(app, p.x, &time_to_x), main_lane);
+        }
+        draw_clip(app, &lp, r, c, true, *to, pps);
         lp.rect_filled(r, 5, Color32::from_black_alpha(60));
+    } else if let (true, Some(p)) = (overlay_to_main, pointer) {
+        draw_marker(&lp, insertion_x(app, p.x, &time_to_x), main_lane);
     }
 
     // ---- ลากไฟล์จากคลังสื่อมาวาง ----
-    drop_from_library(app, ui, &ctx, &lp, full, main_lane, audio_lane, pointer, &time_to_x, &x_to_time);
+    let drop_lanes = DropLanes { main: main_lane, overlay: overlay_lane, audio: audio_lane, to_overlay: &over_overlay };
+    drop_from_library(app, ui, &ctx, &lp, full, &drop_lanes, pointer, &time_to_x, &x_to_time);
 
     // ---- หัวเล่น ----
     let hx = time_to_x(app.playhead);
@@ -458,6 +587,22 @@ fn draw_marker(p: &egui::Painter, x: f32, lane: Rect) {
     p.line_segment([Pos2::new(x, lane.top() - 6.0), Pos2::new(x, lane.bottom() + 6.0)], Stroke::new(3.0, theme::ACCENT));
 }
 
+/// แทร็กที่วางไฟล์จากคลังสื่อลงได้
+struct DropLanes<'a> {
+    main: Rect,
+    overlay: Rect,
+    audio: Rect,
+    /// ตำแหน่งเมาส์นี้วางลงแทร็กภาพซ้อนหรือไม่
+    to_overlay: &'a dyn Fn(Pos2) -> bool,
+}
+
+/// กรอบแสดงตำแหน่งที่คลิปจะไปอยู่ในแทร็กอิสระ
+fn drop_box(lp: &egui::Painter, lane: Rect, x: f32, w: f32) {
+    let r = Rect::from_min_size(Pos2::new(x, lane.top()), egui::vec2(w.max(3.0), lane.height()));
+    lp.rect_filled(r, 5, theme::ACCENT_DARK.gamma_multiply(0.6));
+    lp.rect_stroke(r, 5, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drop_from_library(
     app: &mut TadTorApp,
@@ -465,8 +610,7 @@ fn drop_from_library(
     ctx: &egui::Context,
     lp: &egui::Painter,
     full: Rect,
-    main_lane: Rect,
-    audio_lane: Rect,
+    lanes: &DropLanes,
     pointer: Option<Pos2>,
     time_to_x: &dyn Fn(f64) -> f32,
     x_to_time: &dyn Fn(f32) -> f64,
@@ -476,29 +620,39 @@ fn drop_from_library(
     let Some(item) = app.library.get(&payload.path) else { return };
     let (kind, info) = (item.kind, item.info().cloned());
 
+    let raw_t = x_to_time(p.x);
+    let dur = info.and_then(|i| i.duration).unwrap_or(crate::core::timeline::IMAGE_DEFAULT);
+    let snap_tol = (SNAP_PX / app.px_per_sec) as f64;
+    let targets: Vec<f64> = std::iter::once(0.0)
+        .chain(std::iter::once(app.playhead))
+        .chain(app.timeline.all_clips().flat_map(|c| [c.start, c.end()]))
+        .collect();
+    let t = snap(raw_t, &targets, snap_tol).unwrap_or(raw_t).max(0.0);
+    let w = dur as f32 * app.px_per_sec;
     let mut main_index = None;
     let mut audio_at = None;
-    if kind.is_visual() {
+    let mut overlay_at = None;
+    if kind.is_visual() && (lanes.to_overlay)(p) {
+        drop_box(lp, lanes.overlay, time_to_x(t), w);
+        overlay_at = Some(t);
+    } else if kind.is_visual() {
         let index = app.timeline.main.iter().filter(|c| time_to_x((c.start + c.end()) / 2.0) < p.x).count();
-        draw_marker(lp, insertion_x(app, p.x, time_to_x), main_lane);
+        draw_marker(lp, insertion_x(app, p.x, time_to_x), lanes.main);
         main_index = Some(index);
     } else {
-        let t = x_to_time(p.x);
-        let dur = info.and_then(|i| i.duration).unwrap_or(5.0);
-        let r = Rect::from_min_size(
-            Pos2::new(time_to_x(t), audio_lane.top()),
-            egui::vec2((dur as f32 * app.px_per_sec).max(3.0), audio_lane.height()),
-        );
-        lp.rect_filled(r, 5, theme::ACCENT_DARK.gamma_multiply(0.6));
-        lp.rect_stroke(r, 5, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
-        audio_at = Some(t);
+        let free_t = app.timeline.free_start(TrackKind::Audio, None, t, dur);
+        drop_box(lp, lanes.audio, time_to_x(free_t), w);
+        audio_at = Some(free_t);
     }
     ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
 
     if ui.input(|i| i.pointer.any_released()) {
         egui::DragAndDrop::clear_payload(ctx);
         let path = payload.path.clone();
-        app.add_to_timeline(ctx, &path, main_index, audio_at);
+        match overlay_at {
+            Some(at) => app.add_overlay(ctx, &path, at),
+            None => app.add_to_timeline(ctx, &path, main_index, audio_at),
+        }
     }
 }
 
@@ -506,6 +660,7 @@ fn drop_from_library(
 fn track_header(app: &TadTorApp, ui: &egui::Ui, painter: &egui::Painter, left: f32, lane: Rect, kind: TrackKind) -> bool {
     let tl = &app.timeline;
     let (icon, off, (on_icon, off_icon), tips) = match kind {
+        TrackKind::Overlay => (icons::IMAGE, tl.overlay_hidden, (icons::EYE, icons::EYE_SLASH), ("ซ่อนภาพซ้อน (รวมเสียง)", "แสดงภาพซ้อน")),
         TrackKind::Main => (icons::FILM_STRIP, tl.main_muted, (icons::SPEAKER_HIGH, icons::SPEAKER_SLASH), ("ปิดเสียงแทร็กนี้", "เปิดเสียงแทร็กนี้")),
         TrackKind::Audio => {
             (icons::MUSIC_NOTES, tl.audio_muted, (icons::SPEAKER_HIGH, icons::SPEAKER_SLASH), ("ปิดเสียงแทร็กนี้", "เปิดเสียงแทร็กนี้"))
@@ -579,6 +734,7 @@ fn draw_clip(app: &TadTorApp, lp: &egui::Painter, rect: Rect, c: &Clip, selected
     let clip_p = lp.with_clip_rect(rect.intersect(lp.clip_rect()));
     let vis = clip_p.clip_rect();
     let muted = match kind {
+        TrackKind::Overlay => app.timeline.overlay_hidden,
         TrackKind::Main => app.timeline.main_muted && c.kind == MediaKind::Video,
         TrackKind::Audio => app.timeline.audio_muted,
         TrackKind::Text => app.timeline.text_hidden,
@@ -587,8 +743,8 @@ fn draw_clip(app: &TadTorApp, lp: &egui::Painter, rect: Rect, c: &Clip, selected
     let missing = app.library.get(&c.path).is_some_and(|it| matches!(it.state, MediaState::Failed(_)));
 
     match kind {
-        TrackKind::Main => {
-            clip_p.rect_filled(rect, 5, CLIP_VIDEO);
+        TrackKind::Main | TrackKind::Overlay => {
+            clip_p.rect_filled(rect, 5, if kind == TrackKind::Main { CLIP_VIDEO } else { CLIP_OVERLAY });
             if let Some(tex) = app.thumbs.get(&c.path) {
                 let [tw, th] = tex.size();
                 let tile_h = rect.height();

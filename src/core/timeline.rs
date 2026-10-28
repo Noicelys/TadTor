@@ -1,5 +1,5 @@
 //! ไทม์ไลน์: แทร็กหลัก (ภาพ/วิดีโอ ต่อกันอัตโนมัติไม่มีช่องว่าง แบบ CapCut)
-//! + แทร็กข้อความ / ซับไตเติล / เสียง (วางตรงไหนก็ได้ แต่ในแทร็กเดียวกันไม่ทับกัน)
+//! + แทร็กภาพซ้อน (ซ้อนทับกันได้หลายชั้น) / ข้อความ / ซับไตเติล / เสียง
 //!
 //! ทุกฟังก์ชันที่แก้ไทม์ไลน์อยู่ที่นี่ หน้าจอแค่เรียกใช้ ทำให้ Undo/Redo ทำได้ง่าย ๆ ด้วยการเก็บสำเนา
 
@@ -16,10 +16,14 @@ pub const MIN_CLIP: f64 = 0.1;
 pub const IMAGE_DEFAULT: f64 = 5.0;
 /// ข้อความใหม่ยาวเท่านี้
 pub const TEXT_DEFAULT: f64 = 3.0;
+/// ขนาดเริ่มต้นของภาพซ้อน (สัดส่วนของจอ)
+pub const OVERLAY_ZOOM: f32 = 0.5;
 const EPS: f64 = 1e-6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TrackKind {
+    /// ภาพ/วิดีโอที่วางซ้อนบนแทร็กหลัก
+    Overlay,
     Main,
     Text,
     Subtitle,
@@ -28,10 +32,11 @@ pub enum TrackKind {
 
 impl TrackKind {
     /// ลำดับแทร็กบนจอ (บนลงล่าง)
-    pub const ALL: [TrackKind; 4] = [TrackKind::Main, TrackKind::Text, TrackKind::Subtitle, TrackKind::Audio];
+    pub const ALL: [TrackKind; 5] = [TrackKind::Overlay, TrackKind::Main, TrackKind::Text, TrackKind::Subtitle, TrackKind::Audio];
 
     pub fn label(self) -> &'static str {
         match self {
+            TrackKind::Overlay => "ภาพซ้อน",
             TrackKind::Main => "แทร็กหลัก",
             TrackKind::Text => "ข้อความ",
             TrackKind::Subtitle => "ซับไตเติล",
@@ -41,6 +46,11 @@ impl TrackKind {
 
     pub fn is_text(self) -> bool {
         matches!(self, TrackKind::Text | TrackKind::Subtitle)
+    }
+
+    /// แทร็กที่มีภาพจากไฟล์ (แทร็กหลัก / ภาพซ้อน)
+    pub fn is_visual(self) -> bool {
+        matches!(self, TrackKind::Main | TrackKind::Overlay)
     }
 }
 
@@ -89,6 +99,8 @@ pub struct Timeline {
     pub main: Vec<Clip>,
     pub audio: Vec<Clip>,
     #[serde(default)]
+    pub overlay: Vec<Clip>,
+    #[serde(default)]
     pub text: Vec<Clip>,
     #[serde(default)]
     pub subtitles: Vec<Clip>,
@@ -96,6 +108,8 @@ pub struct Timeline {
     pub main_muted: bool,
     #[serde(default)]
     pub audio_muted: bool,
+    #[serde(default)]
+    pub overlay_hidden: bool,
     #[serde(default)]
     pub text_hidden: bool,
     #[serde(default)]
@@ -170,7 +184,7 @@ impl Timeline {
 
     /// ความยาวงานทั้งหมด
     pub fn duration(&self) -> f64 {
-        self.audio.iter().chain(&self.text).chain(&self.subtitles).map(Clip::end).fold(self.main_end(), f64::max)
+        self.audio.iter().chain(&self.overlay).chain(&self.text).chain(&self.subtitles).map(Clip::end).fold(self.main_end(), f64::max)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -179,6 +193,7 @@ impl Timeline {
 
     pub fn track(&self, kind: TrackKind) -> &Vec<Clip> {
         match kind {
+            TrackKind::Overlay => &self.overlay,
             TrackKind::Main => &self.main,
             TrackKind::Text => &self.text,
             TrackKind::Subtitle => &self.subtitles,
@@ -188,6 +203,7 @@ impl Timeline {
 
     pub fn track_mut(&mut self, kind: TrackKind) -> &mut Vec<Clip> {
         match kind {
+            TrackKind::Overlay => &mut self.overlay,
             TrackKind::Main => &mut self.main,
             TrackKind::Text => &mut self.text,
             TrackKind::Subtitle => &mut self.subtitles,
@@ -221,9 +237,26 @@ impl Timeline {
         }
     }
 
-    /// คลิปในแทร็กที่อยู่ใต้เวลา t
+    /// คลิปในแทร็กที่อยู่ใต้เวลา t (ถ้าซ้อนกันหลายชั้น คืนชั้นบนสุด)
     pub fn clip_at(&self, kind: TrackKind, t: f64) -> Option<&Clip> {
-        self.track(kind).iter().find(|c| t >= c.start && t < c.end())
+        self.track(kind).iter().rev().find(|c| t >= c.start && t < c.end())
+    }
+
+    /// จัดแถวย่อยของแทร็กภาพซ้อน คืน `(จำนวนแถวอย่างน้อย 1, แถวของแต่ละคลิปตามลำดับใน self.overlay)`
+    /// คลิปที่เวลาไม่ทับกันจะอยู่แถวเดียวกัน คลิปที่เวลาทับกันจะขึ้นแถวใหม่ด้านบน
+    pub fn overlay_rows(&self) -> (usize, Vec<usize>) {
+        let mut row_ends: Vec<f64> = Vec::new();
+        let mut rows = Vec::with_capacity(self.overlay.len());
+        for c in &self.overlay {
+            if let Some(r) = row_ends.iter().position(|&end| c.start >= end - EPS) {
+                row_ends[r] = c.end();
+                rows.push(r);
+            } else {
+                rows.push(row_ends.len());
+                row_ends.push(c.end());
+            }
+        }
+        (row_ends.len().max(1), rows)
     }
 
     // ---------- เพิ่ม / ย้าย / ลบ ----------
@@ -236,10 +269,14 @@ impl Timeline {
         id
     }
 
-    /// วางคลิปในแทร็กอิสระ (ข้อความ/ซับ/เสียง) ใกล้ `at` ที่สุดโดยไม่ทับคลิปอื่น
+    /// วางคลิปในแทร็กอิสระ (ภาพซ้อนวางทับกันได้ แทร็กอื่นวางใกล้ `at` ที่สุดโดยไม่ทับคลิปอื่น)
     pub fn place(&mut self, kind: TrackKind, mut clip: Clip, at: f64) -> u64 {
         debug_assert!(kind != TrackKind::Main);
-        clip.start = self.free_start(kind, None, at, clip.dur);
+        clip.start = if kind == TrackKind::Overlay {
+            at.max(0.0)
+        } else {
+            self.free_start(kind, None, at, clip.dur)
+        };
         let id = clip.id;
         self.track_mut(kind).push(clip);
         self.sort_track(kind);
@@ -250,12 +287,44 @@ impl Timeline {
         self.place(TrackKind::Audio, clip, at)
     }
 
+    /// วางภาพ/วิดีโอซ้อนบนแทร็กหลัก (ยังไม่เคยปรับขนาด = ย่อเหลือ `OVERLAY_ZOOM`)
+    pub fn place_overlay(&mut self, mut clip: Clip, at: f64) -> u64 {
+        if (clip.fx.zoom - 1.0).abs() < 1e-3 {
+            clip.fx.zoom = OVERLAY_ZOOM;
+        }
+        self.place(TrackKind::Overlay, clip, at)
+    }
+
+    /// ย้ายคลิประหว่างแทร็กหลักกับแทร็กภาพซ้อน (`at` = เวลาที่วาง แทร็กหลักแทรกที่รอยต่อใกล้สุด)
+    /// ขนาด/ตำแหน่งคืนค่าเริ่มต้นของแทร็กใหม่ เพราะสองแทร็กตีความค่าต่างกัน
+    pub fn move_to_track(&mut self, id: u64, to: TrackKind, at: f64) -> bool {
+        let Some((from, i)) = self.find(id) else {
+            return false;
+        };
+        if from == to || !from.is_visual() || !to.is_visual() {
+            return false;
+        }
+        let mut c = self.track_mut(from).remove(i);
+        c.fx.transition = None;
+        c.fx.zoom = 1.0;
+        c.fx.pan_x = 0.0;
+        c.fx.pan_y = 0.0;
+        self.pack();
+        if to == TrackKind::Main {
+            let index = self.main.iter().filter(|m| (m.start + m.end()) / 2.0 < at).count();
+            self.insert_main(index, c);
+        } else {
+            self.place_overlay(c, at);
+        }
+        true
+    }
+
     fn sort_track(&mut self, kind: TrackKind) {
         self.track_mut(kind).sort_by(|a, b| a.start.total_cmp(&b.start));
     }
 
     /// หาเวลาเริ่มที่ใกล้ `desired` ที่สุดซึ่งวางคลิปยาว `dur` ได้โดยไม่ทับใคร
-    fn free_start(&self, kind: TrackKind, exclude: Option<u64>, desired: f64, dur: f64) -> f64 {
+    pub fn free_start(&self, kind: TrackKind, exclude: Option<u64>, desired: f64, dur: f64) -> f64 {
         let desired = desired.max(0.0);
         let others: Vec<&Clip> = self.track(kind).iter().filter(|c| Some(c.id) != exclude).collect();
         let fits = |s: f64| s >= -EPS && others.iter().all(|c| s + dur <= c.start + EPS || s >= c.end() - EPS);
@@ -289,7 +358,11 @@ impl Timeline {
             return;
         };
         let dur = self.track(kind)[i].dur;
-        let start = self.free_start(kind, Some(id), desired, dur);
+        let start = if kind == TrackKind::Overlay {
+            desired.max(0.0)
+        } else {
+            self.free_start(kind, Some(id), desired, dur)
+        };
         self.track_mut(kind)[i].start = start;
         self.sort_track(kind);
     }
@@ -337,7 +410,7 @@ impl Timeline {
     }
 
     fn neighbors(&self, kind: TrackKind, i: usize) -> (f64, Option<f64>) {
-        if kind == TrackKind::Main {
+        if matches!(kind, TrackKind::Main | TrackKind::Overlay) {
             return (0.0, None);
         }
         let track = self.track(kind);
@@ -365,6 +438,7 @@ impl Timeline {
         c.dur -= d;
         if kind != TrackKind::Main {
             c.start += d;
+            self.sort_track(kind);
         } else {
             self.pack();
         }
@@ -623,6 +697,43 @@ mod tests {
         tl.shift_subtitles(-5.0);
         assert_eq!(tl.subtitles[0].start, 0.0, "ถอยได้ไม่เกินวินาทีที่ 0");
         assert!((tl.subtitles[2].start - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overlay_moves_between_tracks() {
+        let mut tl = Timeline::default();
+        let a = video(&mut tl, 4.0);
+        let b = video(&mut tl, 6.0);
+        let ida = tl.insert_main(0, a);
+        let idb = tl.insert_main(1, b);
+        let pic = tl.new_clip("a.png".into(), "a".into(), MediaKind::Image, &info(0.0));
+        let idp = tl.place_overlay(pic, 7.0);
+        let p = tl.clip(idp).unwrap();
+        assert_eq!((p.start, p.fx.zoom), (7.0, OVERLAY_ZOOM));
+        assert_eq!(tl.duration(), 12.0, "ภาพซ้อนยาวเลยแทร็กหลักได้");
+
+        // ย้ายคลิปหลักขึ้นไปซ้อน: แทร็กหลักชิดกันใหม่ ภาพซ้อนวางในที่ว่างใกล้สุด
+        tl.update_clip(ida, |c| c.fx.transition = Some(Transition { kind: TransitionKind::Fade, dur: 1.0 }));
+        assert!(tl.move_to_track(ida, TrackKind::Overlay, 0.0));
+        assert_eq!(tl.clip(idb).unwrap().start, 0.0);
+        let a = tl.clip(ida).unwrap();
+        assert_eq!((tl.find(ida).unwrap().0, a.start, a.fx.zoom), (TrackKind::Overlay, 0.0, OVERLAY_ZOOM));
+        assert!(a.fx.transition.is_none());
+
+        // ย้ายกลับลงแทร็กหลักท้ายสุด ขนาดกลับเป็นเต็มจอ
+        assert!(tl.move_to_track(ida, TrackKind::Main, 100.0));
+        assert_eq!(tl.main.iter().map(|c| c.id).collect::<Vec<_>>(), [idb, ida]);
+        assert_eq!(tl.clip(ida).unwrap().fx.zoom, 1.0);
+        assert!(!tl.move_to_track(ida, TrackKind::Audio, 0.0));
+
+        // ภาพซ้อนวางทับเวลากันได้หลายชั้น และคำนวณแถวย่อยถูกต้อง
+        let ov2 = video(&mut tl, 4.0);
+        let id_ov2 = tl.place_overlay(ov2, 8.0);
+        assert_eq!(tl.clip(id_ov2).unwrap().start, 8.0);
+        let (n_rows, rows) = tl.overlay_rows();
+        assert_eq!(n_rows, 2);
+        assert_eq!(rows, vec![0, 1]);
+        assert_eq!(tl.clip_at(TrackKind::Overlay, 9.0).unwrap().id, id_ov2);
     }
 
     #[test]

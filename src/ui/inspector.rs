@@ -8,7 +8,7 @@ use crate::core::fx::{ClipFx, Easing, Effect, FilterPreset, Fit, Motion, Rgba, T
 use crate::core::media::{MediaKind, MediaState};
 use crate::core::project::AspectRatio;
 use crate::core::time::format_timecode;
-use crate::core::timeline::TrackKind;
+use crate::core::timeline::{Clip, TrackKind, OVERLAY_ZOOM};
 use crate::ffmpeg::FfmpegStatus;
 use crate::{fonts, icons, theme};
 
@@ -61,7 +61,8 @@ fn project_settings(app: &mut TadTorApp, ui: &mut egui::Ui) {
         ui.label(format_timecode(d, app.project.fps));
     });
     row(ui, "คลิป", |ui| {
-        ui.label(format!("ภาพ {} • เสียง {}", app.timeline.main.len(), app.timeline.audio.len()));
+        let tl = &app.timeline;
+        ui.label(format!("ภาพ {} • ภาพซ้อน {} • เสียง {}", tl.main.len(), tl.overlay.len(), tl.audio.len()));
     });
 }
 
@@ -156,10 +157,20 @@ fn media_details(app: &mut TadTorApp, ui: &mut egui::Ui, path: &Path) {
     });
     ui.add_space(8.0);
     let ready = matches!(item.state, MediaState::Ready(_));
+    let visual = item.kind.is_visual();
     ui.horizontal(|ui| {
         let ctx = ui.ctx().clone();
         if ui.add_enabled(ready, egui::Button::new(format!("{} ใส่ลงไทม์ไลน์", icons::PLUS))).clicked() {
             app.add_to_timeline(&ctx, path, None, None);
+        }
+        if visual
+            && ui
+                .add_enabled(ready, egui::Button::new(format!("{} ซ้อนที่หัวเล่น", icons::IMAGE)))
+                .on_hover_text("วางบนแทร็กภาพซ้อน ทับภาพในแทร็กหลัก (ภาพซ้อนเล็ก โลโก้ สติกเกอร์)")
+                .clicked()
+        {
+            let at = app.playhead;
+            app.add_overlay(&ctx, path, at);
         }
         if ui.button("เอาออกจากคลัง").clicked() {
             app.remove_media(path);
@@ -217,17 +228,10 @@ fn clip_details(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64) {
             let resp = ui.add(Fader::new(&mut v, 0.0..=200.0).step(1.0).suffix("%").default_value(100.0));
             app.live_edit(&resp, |tl| tl.update_clip(id, |c| c.fx.volume = v / 100.0));
         });
-        let max_fade = (c.dur / 2.0).clamp(0.1, 10.0);
-        row(ui, "เฟดเข้า", |ui| {
-            let mut f = c.fx.fade_in;
-            let resp = ui.add(Fader::new(&mut f, 0.0..=max_fade).step(0.1).suffix(" วิ").default_value(0.0));
-            app.live_edit(&resp, |tl| tl.update_clip(id, |c| c.fx.fade_in = f));
-        });
-        row(ui, "เฟดออก", |ui| {
-            let mut f = c.fx.fade_out;
-            let resp = ui.add(Fader::new(&mut f, 0.0..=max_fade).step(0.1).suffix(" วิ").default_value(0.0));
-            app.live_edit(&resp, |tl| tl.update_clip(id, |c| c.fx.fade_out = f));
-        });
+        // ภาพซ้อนตั้งเฟดในหัวข้อ "ภาพซ้อน" (เฟดทั้งภาพและเสียง)
+        if track != TrackKind::Overlay {
+            fade_rows(app, ui, id, &c);
+        }
         row(ui, "เปลี่ยนเสียง", |ui| {
             let mut v = c.fx.voice;
             egui::ComboBox::from_id_salt("insp_voice").selected_text(v.label()).show_ui(ui, |ui| {
@@ -264,9 +268,12 @@ fn clip_details(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64) {
     if track == TrackKind::Main {
         layout_editor(app, ui, id, &c.fx);
     }
+    if track == TrackKind::Overlay {
+        overlay_editor(app, ui, id, &c);
+    }
 
     // ---- ภาพ (สรุป + ปุ่มไปแท็บที่แก้) ----
-    if track == TrackKind::Main {
+    if track.is_visual() {
         section(ui, &format!("{} ภาพ", icons::PALETTE));
         let mut go = None;
         let mut line = |ui: &mut egui::Ui, label: &str, value: String, tab: LeftTab| {
@@ -291,7 +298,7 @@ fn clip_details(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64) {
         };
         line(ui, "เอฟเฟกต์", effect, LeftTab::Effects);
         let is_last = app.timeline.main.last().map(|l| l.id) == Some(id);
-        if !is_last {
+        if track == TrackKind::Main && !is_last {
             let tr = match c.fx.transition {
                 Some(t) => format!("{} {:.1} วิ", t.kind.label(), t.dur),
                 None => "ไม่มี".to_owned(),
@@ -312,8 +319,34 @@ fn clip_details(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64) {
             app.delete_selected();
         }
     });
+    let toggle_label = match track {
+        TrackKind::Main => Some("ย้ายไปซ้อนบนภาพ"),
+        TrackKind::Overlay => Some("ย้ายลงแทร็กหลัก"),
+        _ => None,
+    };
+    if let Some(label) = toggle_label {
+        if ui.button(format!("{} {label}", icons::IMAGE)).on_hover_text("ลากคลิปขึ้น/ลงระหว่างแทร็กในไทม์ไลน์ก็ได้").clicked()
+        {
+            app.toggle_clip_overlay(id);
+        }
+    }
     ui.add_space(4.0);
     ui.label(RichText::new("ลากขอบซ้าย/ขวาของคลิปเพื่อตัดหัว/ท้าย • ลากกลางคลิปเพื่อย้าย").color(theme::TEXT_DIM).size(12.5));
+}
+
+/// เฟดเข้า/ออก (เสียง และภาพของภาพซ้อน)
+fn fade_rows(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64, c: &Clip) {
+    let max_fade = (c.dur / 2.0).clamp(0.1, 10.0);
+    row(ui, "เฟดเข้า", |ui| {
+        let mut f = c.fx.fade_in;
+        let resp = ui.add(Fader::new(&mut f, 0.0..=max_fade).step(0.1).suffix(" วิ").default_value(0.0));
+        app.live_edit(&resp, |tl| tl.update_clip(id, |c| c.fx.fade_in = f));
+    });
+    row(ui, "เฟดออก", |ui| {
+        let mut f = c.fx.fade_out;
+        let resp = ui.add(Fader::new(&mut f, 0.0..=max_fade).step(0.1).suffix(" วิ").default_value(0.0));
+        app.live_edit(&resp, |tl| tl.update_clip(id, |c| c.fx.fade_out = f));
+    });
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
@@ -394,6 +427,65 @@ fn layout_editor(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64, fx: &ClipFx) {
     if fx.has_layout() && ui.small_button(format!("{} คืนค่าการจัดวาง", icons::ARROW_COUNTER_CLOCKWISE)).clicked()
     {
         set(app, id, ClipFx::reset_layout);
+    }
+}
+
+/// ขนาด ตำแหน่ง ความทึบ เฟด หมุน กลับด้าน ของคลิปในแทร็กภาพซ้อน
+fn overlay_editor(app: &mut TadTorApp, ui: &mut egui::Ui, id: u64, c: &Clip) {
+    let fx = &c.fx;
+    section(ui, &format!("{} ภาพซ้อน", icons::IMAGE));
+    fn set(app: &mut TadTorApp, id: u64, f: impl FnOnce(&mut ClipFx)) {
+        app.edit(|tl| tl.update_clip(id, |c| f(&mut c.fx)));
+    }
+    row(ui, "ขนาด", |ui| {
+        fx_slider(app, ui, id, fx.zoom * 100.0, 5.0..=200.0, 1.0, "%", OVERLAY_ZOOM * 100.0, |f, v| f.zoom = v / 100.0)
+    })
+    .on_hover_text("100% = พอดีจอ");
+    row(ui, "วางที่", |ui| {
+        const SPOTS: [(&str, f32, f32); 5] =
+            [("ซ้ายบน", -0.9, -0.9), ("ขวาบน", 0.9, -0.9), ("กลาง", 0.0, 0.0), ("ซ้ายล่าง", -0.9, 0.9), ("ขวาล่าง", 0.9, 0.9)];
+        for (label, x, y) in SPOTS {
+            if ui.small_button(label).clicked() {
+                set(app, id, |f| {
+                    f.pan_x = x;
+                    f.pan_y = y;
+                });
+            }
+        }
+    });
+    row(ui, "ซ้าย-ขวา", |ui| {
+        fx_slider(app, ui, id, fx.pan_x * 100.0, -100.0..=100.0, 1.0, "%", 0.0, |f, v| f.pan_x = v / 100.0)
+    });
+    row(ui, "บน-ล่าง", |ui| {
+        fx_slider(app, ui, id, fx.pan_y * 100.0, -100.0..=100.0, 1.0, "%", 0.0, |f, v| f.pan_y = v / 100.0)
+    });
+    dim(ui, "ลากภาพในเครื่องเล่นเพื่อย้ายได้เลย");
+    row(ui, "ความทึบ", |ui| {
+        fx_slider(app, ui, id, fx.opacity * 100.0, 0.0..=100.0, 1.0, "%", 100.0, |f, v| f.opacity = v / 100.0)
+    });
+    fade_rows(app, ui, id, c);
+    row(ui, "หมุน", |ui| {
+        for q in 0..4u8 {
+            if ui.add(egui::Button::selectable(fx.rotate % 4 == q, format!("{}°", q as u32 * 90))).clicked() {
+                set(app, id, |x| x.rotate = q);
+            }
+        }
+    });
+    row(ui, "กลับด้าน", |ui| {
+        if ui.add(egui::Button::selectable(fx.flip_h, "ซ้าย-ขวา")).clicked() {
+            set(app, id, |x| x.flip_h = !x.flip_h);
+        }
+        if ui.add(egui::Button::selectable(fx.flip_v, "บน-ล่าง")).clicked() {
+            set(app, id, |x| x.flip_v = !x.flip_v);
+        }
+    });
+    if ui.small_button(format!("{} คืนค่าภาพซ้อน", icons::ARROW_COUNTER_CLOCKWISE)).clicked() {
+        set(app, id, |f| {
+            f.reset_layout();
+            f.zoom = OVERLAY_ZOOM;
+            f.fade_in = 0.0;
+            f.fade_out = 0.0;
+        });
     }
 }
 

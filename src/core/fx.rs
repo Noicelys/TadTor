@@ -509,9 +509,10 @@ pub struct ClipFx {
     pub denoise: f32,
     // ---- จัดวางภาพ ----
     pub fit: Fit,
-    /// 1 = ขนาดตามแบบวาง
+    /// 1 = ขนาดตามแบบวาง (ภาพซ้อน: 1 = พอดีจอ)
     pub zoom: f32,
     /// เลื่อนภาพ -1..1 (บวก = ไปขวา/ลง) มีผลเมื่อภาพใหญ่หรือเล็กกว่าจอ
+    /// ภาพซ้อน: -1 = ชิดซ้าย/บน, 0 = กลาง, 1 = ชิดขวา/ล่าง
     pub pan_x: f32,
     pub pan_y: f32,
     /// หมุนทีละ 90° ตามเข็มนาฬิกา (0..3)
@@ -520,6 +521,8 @@ pub struct ClipFx {
     pub flip_v: bool,
     /// สีพื้นที่ว่างรอบภาพ
     pub background: Rgba,
+    /// ความทึบ 0..1 (ภาพซ้อนเท่านั้น)
+    pub opacity: f32,
     // ---- ภาพ ----
     pub filter: FilterPreset,
     /// ความเข้มฟิลเตอร์ 0..1
@@ -570,6 +573,7 @@ impl Default for ClipFx {
             flip_h: false,
             flip_v: false,
             background: [0, 0, 0, 255],
+            opacity: 1.0,
             filter: FilterPreset::None,
             filter_amount: 1.0,
             brightness: 0.0,
@@ -642,6 +646,7 @@ impl ClipFx {
             || self.flip_h
             || self.flip_v
             || self.background != d.background
+            || (self.opacity - d.opacity).abs() > 1e-3
     }
 
     pub fn reset_layout(&mut self) {
@@ -654,6 +659,7 @@ impl ClipFx {
         self.flip_h = d.flip_h;
         self.flip_v = d.flip_v;
         self.background = d.background;
+        self.opacity = d.opacity;
     }
 
     /// ปรับแต่งเสียงต่างจากค่าเริ่มต้นหรือไม่ (ไม่นับระดับเสียงและเฟด)

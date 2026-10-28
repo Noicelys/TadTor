@@ -132,12 +132,16 @@ fn media_grid(app: &mut TadTorApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut clicked = None;
         let mut add = None;
+        let mut add_overlay = None;
+        let mut remove = None;
         let paths: Vec<PathBuf> = app.library.items.iter().map(|it| it.path.clone()).collect();
         for row in paths.chunks(cols) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 for path in row {
                     let Some(item) = app.library.get(path) else { continue };
+                    let is_ready = matches!(item.state, MediaState::Ready(_));
+                    let is_visual = item.kind.is_visual();
                     let drag_id = egui::Id::unique(("media_drag", path));
                     let payload = MediaDrag { path: path.clone() };
                     let inner = ui.dnd_drag_source(drag_id, payload, |ui| {
@@ -192,11 +196,29 @@ fn media_grid(app: &mut TadTorApp, ui: &mut egui::Ui) {
                             FontId::proportional(12.5),
                             theme::TEXT,
                         );
-                        // ปุ่ม + มุมขวาบน (ตอนชี้เมาส์) = ใส่ลงท้ายไทม์ไลน์
+                        // ปุ่ม + และปุ่มซ้อน มุมขวาบน (ตอนชี้เมาส์)
                         let plus_r = egui::Rect::from_min_size(thumb.right_top() + egui::vec2(-26.0, 4.0), egui::vec2(22.0, 22.0));
-                        let show_plus = resp.hovered() || ui.rect_contains_pointer(plus_r);
-                        let plus = ui.interact(plus_r, egui::Id::unique(("media_add", path)), Sense::click());
-                        if show_plus && matches!(item.state, MediaState::Ready(_)) {
+                        let ov_r = egui::Rect::from_min_size(thumb.right_top() + egui::vec2(-52.0, 4.0), egui::vec2(22.0, 22.0));
+                        let show_btns = resp.hovered() || ui.rect_contains_pointer(plus_r) || (is_visual && ui.rect_contains_pointer(ov_r));
+                        let plus = ui
+                            .interact(plus_r, egui::Id::unique(("media_add", path)), Sense::click())
+                            .on_hover_text(if is_visual { "ใส่ต่อท้ายแทร็กหลัก" } else { "วางที่หัวเล่น (แทร็กเสียง)" });
+                        let ov_btn = is_visual.then(|| {
+                            ui.interact(ov_r, egui::Id::unique(("media_ov", path)), Sense::click())
+                                .on_hover_text("วางซ้อนที่หัวเล่น (แทร็กภาพซ้อน)")
+                        });
+                        if show_btns && is_ready {
+                            if let Some(ov) = &ov_btn {
+                                let fill = if ov.hovered() { theme::ACCENT } else { egui::Color32::from_black_alpha(190) };
+                                ui.painter().rect_filled(ov_r, 11, fill);
+                                ui.painter().text(
+                                    ov_r.center(),
+                                    Align2::CENTER_CENTER,
+                                    icons::INTERSECT,
+                                    FontId::proportional(13.0),
+                                    egui::Color32::WHITE,
+                                );
+                            }
                             let fill = if plus.hovered() { theme::ACCENT } else { theme::ACCENT_DARK };
                             ui.painter().rect_filled(plus_r, 11, fill);
                             ui.painter().text(
@@ -207,7 +229,9 @@ fn media_grid(app: &mut TadTorApp, ui: &mut egui::Ui) {
                                 egui::Color32::WHITE,
                             );
                         }
-                        if plus.clicked() {
+                        if ov_btn.as_ref().is_some_and(|b| b.clicked()) {
+                            add_overlay = Some(path.clone());
+                        } else if plus.clicked() {
                             add = Some(path.clone());
                         } else if resp.clicked() {
                             clicked = Some(path.clone());
@@ -216,9 +240,33 @@ fn media_grid(app: &mut TadTorApp, ui: &mut egui::Ui) {
                             add = Some(path.clone());
                         }
                     });
+                    inner.response.context_menu(|ui| {
+                        app.selected_clip = None;
+                        app.selected_media = Some(path.clone());
+                        let add_label = if is_visual {
+                            format!("{} ใส่ต่อท้ายแทร็กหลัก", icons::PLUS)
+                        } else {
+                            format!("{} วางที่หัวเล่น", icons::PLUS)
+                        };
+                        if ui.add_enabled(is_ready, egui::Button::new(add_label)).clicked() {
+                            add = Some(path.clone());
+                            ui.close();
+                        }
+                        if is_visual
+                            && ui.add_enabled(is_ready, egui::Button::new(format!("{} วางซ้อนที่หัวเล่น (แทร็กภาพซ้อน)", icons::INTERSECT))).clicked()
+                        {
+                            add_overlay = Some(path.clone());
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button(format!("{} เอาออกจากคลัง", icons::TRASH)).clicked() {
+                            remove = Some(path.clone());
+                            ui.close();
+                        }
+                    });
                     let tip = match &item.state {
                         MediaState::Failed(e) => format!("{}\n{} {e}", item.path.display(), icons::WARNING),
-                        _ => format!("{}\nลากลงไทม์ไลน์ หรือดับเบิลคลิกเพื่อเพิ่มต่อท้าย", item.path.display()),
+                        _ => format!("{}\nลากลงไทม์ไลน์ • ดับเบิลคลิกเพื่อเพิ่มต่อท้าย • คลิกขวาเพื่อเลือกแทร็ก", item.path.display()),
                     };
                     inner.response.on_hover_text(tip);
                 }
@@ -231,6 +279,13 @@ fn media_grid(app: &mut TadTorApp, ui: &mut egui::Ui) {
         }
         if let Some(path) = add {
             app.add_to_timeline(&ctx, &path, None, None);
+        }
+        if let Some(path) = add_overlay {
+            let at = app.playhead;
+            app.add_overlay(&ctx, &path, at);
+        }
+        if let Some(path) = remove {
+            app.remove_media(&path);
         }
     });
 }

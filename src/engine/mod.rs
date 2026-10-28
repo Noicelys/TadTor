@@ -224,6 +224,31 @@ mod integration {
         }
     }
 
+    /// ภาพซ้อนบนแทร็กหลัก: เขียนภาพตัวอย่างไว้ที่ work_dir/overlay.png ให้เปิดดูด้วยตา
+    /// (รูปพื้นใสมุมขวาบนเฟดเข้า + วิดีโอซ้อนมุมซ้ายล่าง ทุก ๆ 0.5 วิ)
+    #[test]
+    #[ignore]
+    fn overlay_sheet() {
+        let (ffmpeg, ffprobe, media) = tools();
+        let mut tl = sample_timeline(&ffprobe, &media);
+        for (file, at, pan) in [("pic.png", 0.5, (0.9, -0.9)), ("tall_noaudio.mp4", 2.0, (-0.9, 0.9))] {
+            let (kind, inf) = info(&ffprobe, &media.join(file));
+            let c = tl.new_clip(media.join(file), file.into(), kind, &inf);
+            let id = tl.place_overlay(c, at);
+            tl.update_clip(id, |c| {
+                (c.fx.pan_x, c.fx.pan_y) = pan;
+                c.fx.fade_in = 1.0;
+            });
+            tl.set_duration(id, 2.0);
+        }
+        let spec = VideoSpec { width: 320, height: 180, fps: 10 };
+        let mut g = graph::build(&tl, 0.0, 4.0, Some(spec), None);
+        g.filter.push_str(";\n[vout]select='not(mod(n\\,5))',tile=4x2[sheet]");
+        let png = graph::work_dir().join("overlay.png");
+        let out = run_graph(&ffmpeg, &g, &["-map", "[sheet]", "-frames:v", "1", "-y", png.to_str().unwrap()]);
+        assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stderr), g.filter);
+    }
+
     /// ฟิลเตอร์ เอฟเฟกต์ ทรานซิชัน เสียง ทุกแบบต้องผ่าน FFmpeg ได้
     #[test]
     #[ignore]
@@ -288,6 +313,30 @@ mod integration {
             let mut tl = base.clone();
             tl.update_clip(first, |c| c.fx.transition = Some(Transition { kind: k, dur: 0.6 }));
             cases.push((format!("transition {k:?}"), tl));
+        }
+        // ภาพซ้อน: รูป (พื้นใส) + วิดีโอแนวตั้ง กับเฟด ความทึบ หมุน ฟิลเตอร์ และเอฟเฟกต์ที่แยกสาย
+        for (i, &e) in [Effect::None, Effect::Glow, Effect::Mirror, Effect::Cinema].iter().enumerate() {
+            let mut tl = base.clone();
+            for (file, at) in [("pic.png", 0.5), ("tall_noaudio.mp4", 2.0)] {
+                let (kind, inf) = info(&ffprobe, &media.join(file));
+                let mut c = tl.new_clip(media.join(file), file.into(), kind, &inf);
+                c.fx = ClipFx {
+                    zoom: 0.3 + i as f32 * 0.4,
+                    pan_x: -0.8,
+                    pan_y: 0.5,
+                    rotate: i as u8,
+                    opacity: 0.7,
+                    fade_in: 1.0,
+                    fade_out: 0.5,
+                    effect: e,
+                    filter: FilterPreset::Sepia,
+                    filter_amount: 0.5,
+                    ..ClipFx::default()
+                };
+                let id = tl.place_overlay(c, at);
+                tl.set_duration(id, 2.0);
+            }
+            cases.push((format!("overlay {e:?}"), tl));
         }
         for (name, tl) in &cases {
             let g = graph::build(tl, 1.0, 3.0, Some(spec), None);

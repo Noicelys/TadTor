@@ -102,7 +102,8 @@ fn target_line(app: &TadTorApp, ui: &mut egui::Ui, want: Want) -> Option<u64> {
     let track = c.and_then(|c| app.timeline.find(c.id)).map(|f| f.0);
     let ok = match (c, want) {
         (None, _) => false,
-        (Some(_), Want::Visual) => track == Some(TrackKind::Main),
+        (Some(_), Want::Visual) => track.is_some_and(TrackKind::is_visual),
+        (Some(_), Want::Main) => track == Some(TrackKind::Main),
         (Some(c), Want::Sound) => c.has_audio,
         (Some(_), Want::Text) => track.is_some_and(TrackKind::is_text),
     };
@@ -114,6 +115,7 @@ fn target_line(app: &TadTorApp, ui: &mut egui::Ui, want: Want) -> Option<u64> {
         _ => {
             let msg = match want {
                 Want::Visual => "คลิกเลือกคลิปวิดีโอ/รูปในไทม์ไลน์ แล้วเลือกด้านล่าง",
+                Want::Main => "คลิกเลือกคลิปในแทร็กหลัก แล้วเลือกด้านล่าง",
                 Want::Sound => "คลิกเลือกคลิปที่มีเสียงในไทม์ไลน์ แล้วเลือกด้านล่าง",
                 Want::Text => "คลิกเลือกข้อความในไทม์ไลน์เพื่อเปลี่ยนสไตล์",
             };
@@ -360,7 +362,7 @@ fn transitions_tab(app: &mut TadTorApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     section(ui, &format!("{}  ทรานซิชัน", icons::INTERSECT));
     hint(ui, "เลือกคลิปในแทร็กหลัก ทรานซิชันจะอยู่ระหว่างคลิปนั้นกับคลิปถัดไป (หรือคลิกรูปเพชรตรงรอยต่อในไทม์ไลน์)");
-    let target = target_line(app, ui, Want::Visual);
+    let target = target_line(app, ui, Want::Main);
     let idx = target.and_then(|id| app.timeline.main.iter().position(|c| c.id == id));
     let is_last = idx.is_some_and(|i| i + 1 >= app.timeline.main.len());
     if is_last {
@@ -369,7 +371,7 @@ fn transitions_tab(app: &mut TadTorApp, ui: &mut egui::Ui) {
     let cur = target.and_then(|id| app.timeline.clip(id)).and_then(|c| c.fx.transition);
     let picked = grid(ui, TransitionKind::ALL, cur.map(|t| t.kind), |k| k.label().to_owned(), |_| theme::ACCENT_DARK);
     if let Some(kind) = picked {
-        match (app.selected_where(&ctx, Want::Visual), is_last) {
+        match (app.selected_where(&ctx, Want::Main), is_last) {
             (Some(_), true) => app.notify(&ctx, "เลือกคลิปที่ไม่ใช่คลิปสุดท้าย"),
             (Some(c), false) => {
                 let dur = cur.map_or(TRANSITION_DEFAULT, |t| t.dur);

@@ -78,7 +78,7 @@ fn mmss(t: f64) -> String {
 }
 
 fn start(app: &mut TadTorApp, ctx: &egui::Context) {
-    if app.timeline.main.is_empty() && app.timeline.audio.is_empty() {
+    if app.timeline.main.is_empty() && app.timeline.overlay.is_empty() && app.timeline.audio.is_empty() {
         app.notify(ctx, "ยังไม่มีคลิปให้ถอดเสียง");
         return;
     }

@@ -36,9 +36,12 @@ pub fn specs() -> Vec<Value> {
     let fx_help = format!(
         "Partial clip effects, only the keys to change. Keys: volume (0-2, 1=original), fade_in, fade_out (s), voice ({}), \
          pitch (semitones -12..12), bass, treble (dB -12..12), denoise (0-1), fit ({}), zoom (1=fit), pan_x, pan_y (-1..1), \
-         rotate (quarter turns 0-3), flip_h, flip_v, background ([r,g,b,255]), filter ({}), filter_amount (0-1), brightness, \
-         contrast, saturation, temperature, hue, tint, highlights, shadows (-1..1), sharpen, vignette, fade, grain (0-1), \
-         effect ({}), effect_amount (0-2), transition (null or {{\"kind\": one of {}, \"dur\": seconds}}; main track, to the next clip).",
+         rotate (quarter turns 0-3), flip_h, flip_v, background ([r,g,b,255]), opacity (0-1, overlay only), filter ({}), \
+         filter_amount (0-1), brightness, contrast, saturation, temperature, hue, tint, highlights, shadows (-1..1), sharpen, \
+         vignette, fade, grain (0-1), effect ({}), effect_amount (0-2), \
+         transition (null or {{\"kind\": one of {}, \"dur\": seconds}}; main track, to the next clip). \
+         Overlay clips: zoom = size (1 = fits the frame, default 0.5), pan_x/pan_y = position (-1 = left/top edge, 0 = centre, \
+         1 = right/bottom edge), fade_in/fade_out also fade the picture.",
         names(Voice::ALL),
         names(Fit::ALL),
         names(FilterPreset::ALL),
@@ -65,12 +68,14 @@ pub fn specs() -> Vec<Value> {
         ),
         tool(
             "add_clip",
-            "Put a file on the timeline (imports it first if needed). Video/images go to the main track (clips play back to back); \
+            "Put a file on the timeline (imports it first if needed). Video/images go to the main track (clips play back to back), \
+             or with `overlay` on top of the main track at `start` (picture-in-picture, logo, sticker, B-roll); \
              audio goes to the audio track at `start`.",
             json!({
                 "path": { "type": "string", "description": "Absolute file path" },
                 "index": { "type": "integer", "description": "Main track position (default: end)" },
-                "start": num("Audio track start time in seconds (default: playhead)"),
+                "start": num("Audio/overlay track start time in seconds (default: playhead)"),
+                "overlay": { "type": "boolean", "description": "Video/image: put it on the overlay track instead of the main track" },
             }),
             &["path"],
         ),
@@ -102,8 +107,14 @@ pub fn specs() -> Vec<Value> {
         ),
         tool(
             "move_clip",
-            "Move a clip: main track by `index`, other tracks to time `start` (snaps to the nearest free spot).",
-            json!({ "id": { "type": "integer" }, "index": { "type": "integer" }, "start": num("Seconds") }),
+            "Move a clip: main track by `index`, other tracks to time `start` (snaps to the nearest free spot). \
+             `track` (\"main\" or \"overlay\") moves a video/image clip between the main and overlay tracks (at `start`).",
+            json!({
+                "id": { "type": "integer" },
+                "index": { "type": "integer" },
+                "start": num("Seconds"),
+                "track": { "type": "string", "enum": ["main", "overlay"] },
+            }),
             &["id"],
         ),
         tool(
@@ -258,6 +269,7 @@ fn diff<T: Serialize + Default>(cur: &T) -> Value {
 
 fn track_name(k: TrackKind) -> &'static str {
     match k {
+        TrackKind::Overlay => "overlay",
         TrackKind::Main => "main",
         TrackKind::Text => "text",
         TrackKind::Subtitle => "subtitle",
@@ -366,10 +378,12 @@ fn timeline(app: &TadTorApp, include_subs: bool) -> Value {
         "playhead": r3(app.playhead),
         "selected_clip": app.selected_clip,
         "main": track(TrackKind::Main),
+        "overlay": track(TrackKind::Overlay),
         "text": track(TrackKind::Text),
         "audio": track(TrackKind::Audio),
         "subtitle_count": tl.subtitles.len(),
         "muted": { "main": tl.main_muted, "audio": tl.audio_muted },
+        "overlay_hidden": tl.overlay_hidden,
     });
     if include_subs {
         v["subtitles"] = subtitles_json(app);
@@ -434,7 +448,12 @@ fn add_clip(app: &mut TadTorApp, ctx: &egui::Context, a: &Value) -> Outcome {
         MediaState::Ready(_) => {
             let before: Vec<u64> = app.timeline.all_clips().map(|c| c.id).collect();
             let index = a["index"].as_u64().map(|i| (i as usize).min(app.timeline.main.len()));
-            app.add_to_timeline(ctx, &path, index, opt_num(a, "start"));
+            if a["overlay"].as_bool().unwrap_or(false) {
+                let at = opt_num(a, "start").unwrap_or(app.playhead);
+                app.add_overlay(ctx, &path, at);
+            } else {
+                app.add_to_timeline(ctx, &path, index, opt_num(a, "start"));
+            }
             let new = app.timeline.all_clips().find(|c| !before.contains(&c.id)).cloned();
             match new {
                 Some(c) => {
@@ -513,7 +532,18 @@ fn trim(app: &mut TadTorApp, a: &Value) -> Result<Value, String> {
 fn move_clip(app: &mut TadTorApp, a: &Value) -> Result<Value, String> {
     let id = id_of(a, "id")?;
     let (kind, _) = app.timeline.find(id).ok_or("ไม่พบคลิปนี้")?;
-    if kind == TrackKind::Main {
+    let to = match a["track"].as_str() {
+        Some("main") => Some(TrackKind::Main),
+        Some("overlay") => Some(TrackKind::Overlay),
+        Some(other) => return Err(format!("ไม่รู้จักแทร็ก {other}")),
+        None => None,
+    };
+    if let Some(to) = to.filter(|t| *t != kind) {
+        let at = opt_num(a, "start").unwrap_or_else(|| app.timeline.clip(id).map_or(0.0, |c| c.start));
+        if !app.edit(|tl| tl.move_to_track(id, to, at)) {
+            return Err("ย้ายได้เฉพาะคลิปวิดีโอ/รูประหว่างแทร็กหลักกับภาพซ้อน".to_owned());
+        }
+    } else if kind == TrackKind::Main {
         let to = a["index"].as_u64().ok_or("คลิปแทร็กหลักต้องระบุ index")? as usize;
         app.edit(|tl| tl.move_main(id, to.min(tl.main.len().saturating_sub(1))));
     } else {
