@@ -81,10 +81,7 @@ pub struct TranscribeOptions {
 
 /// ที่เก็บ whisper: โฟลเดอร์ `whisper` ข้างโปรแกรม หรือในโฟลเดอร์โปรเจกต์ (ตอน cargo run)
 fn base_dirs() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Some(d) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
-        v.push(d.join("whisper"));
-    }
+    let mut v = vec![install_dir()];
     if let Ok(d) = std::env::current_dir() {
         v.push(d.join("whisper"));
     }
@@ -118,11 +115,7 @@ pub fn ready() -> bool {
 /// ที่จะติดตั้งถ้ายังไม่มี: ข้างไฟล์โปรแกรม
 /// ยกเว้นตอนรันจาก target\ ของ cargo ให้ไปไว้ในโฟลเดอร์โปรเจกต์ ไม่งั้น cargo clean จะลบทิ้ง
 fn install_dir() -> PathBuf {
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-    match exe_dir {
-        Some(d) if !d.components().any(|c| c.as_os_str() == "target") => d.join("whisper"),
-        _ => std::env::current_dir().unwrap_or_default().join("whisper"),
-    }
+    crate::paths::app_dir().join("whisper")
 }
 
 #[derive(Clone, Debug)]

@@ -8,6 +8,7 @@ mod ffmpeg;
 mod fonts;
 mod icons;
 mod mcp;
+mod paths;
 mod theme;
 mod ui;
 
@@ -20,6 +21,14 @@ fn main() -> eframe::Result {
     // tadtor.exe --mcp = เซิร์ฟเวอร์ MCP ให้ AI สั่งงานโปรแกรม (ไม่เปิดหน้าต่าง)
     if std::env::args().any(|a| a == "--mcp") {
         mcp::bridge::run();
+        return Ok(());
+    }
+    // tadtor.exe --create-shortcuts = สร้างทางลัดบนเดสก์ท็อป/เมนู Start แล้วจบ (run.bat เรียกหลังคอมไพล์)
+    if std::env::args().any(|a| a == "--create-shortcuts") {
+        if let Err(e) = paths::create_shortcuts() {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
         return Ok(());
     }
     fonts::warm_up();

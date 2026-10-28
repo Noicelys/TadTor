@@ -49,6 +49,13 @@ pub fn show(app: &mut TadTorApp, ui: &mut egui::Ui) {
                     ui.menu_button(format!("{}  จัดหน้าจอ", icons::SLIDERS_HORIZONTAL), |ui| {
                         super::layout::menu(app, ui)
                     });
+                    if item(ui, &format!("{}  สร้างทางลัดบนเดสก์ท็อป", icons::FILE_PLUS), "") {
+                        ui.close();
+                        match crate::paths::create_shortcuts() {
+                            Ok(_) => app.notify(&ctx, "สร้างทางลัดบนเดสก์ท็อปและเมนู Start แล้ว"),
+                            Err(e) => app.notify(&ctx, e),
+                        }
+                    }
                     ui.separator();
                     if ui.button(format!("{}  ออกจากโปรแกรม", icons::SIGN_OUT)).clicked() {
                         ui.close();

@@ -110,11 +110,9 @@ fn candidate_dirs() -> Vec<PathBuf> {
         dirs.push(base.join("ffmpeg"));
         dirs.push(base);
     };
-    // 1) โฟลเดอร์ ffmpeg ข้างไฟล์โปรแกรม (ตอนแจกจ่ายโปรแกรม)
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
-        push_base(dir);
-    }
-    // 2) โฟลเดอร์ ffmpeg ในโฟลเดอร์โปรเจกต์ (ตอนสั่ง cargo run)
+    // 1) โฟลเดอร์ ffmpeg ข้างไฟล์โปรแกรม (หรือในโฟลเดอร์โปรเจกต์ตอนรันจาก target\)
+    push_base(crate::paths::app_dir());
+    // 2) โฟลเดอร์ปัจจุบัน
     if let Ok(dir) = std::env::current_dir() {
         push_base(dir);
     }

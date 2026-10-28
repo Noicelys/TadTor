@@ -94,17 +94,9 @@ fn connect() -> Option<(TcpStream, String)> {
 /// เปิดโปรแกรม TadTor แล้วรอจนรับคำสั่งได้
 fn launch() -> Result<(TcpStream, String), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // ทำงานในโฟลเดอร์โปรแกรม (หา ffmpeg/whisper เจอ) ตอนรันจาก target\ ของ cargo ใช้โฟลเดอร์โปรเจกต์
-    let dir = exe
-        .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "target"))
-        .and_then(|p| p.parent())
-        .or_else(|| exe.parent())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
     let _ = std::fs::remove_file(info_path());
     std::process::Command::new(&exe)
-        .current_dir(dir)
+        .current_dir(crate::paths::app_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

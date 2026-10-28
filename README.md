@@ -24,11 +24,11 @@
 ### คอมไพล์และเปิดโปรแกรม
 
 ```bat
-run.bat            :: แบบ debug (คอมไพล์เร็ว มีหน้าต่าง log)
-run.bat release    :: แบบเร็วที่สุด ได้ target\release\tadtor.exe
+run.bat          :: คอมไพล์แบบเร็วที่สุด สร้างทางลัด TadTor บนเดสก์ท็อป + เมนู Start แล้วเปิดโปรแกรม
+run.bat debug    :: แบบ debug มีหน้าต่าง cmd แสดง log (ใช้ตอนพัฒนา)
 ```
 
-หรือใช้ `cargo run` / `cargo build --release` ตรง ๆ ก็ได้ ครั้งแรกใช้เวลาราว 5–15 นาที
+ครั้งแรกใช้เวลาราว 5–15 นาที หลังจากนั้นเปิดจากไอคอน **TadTor** บนเดสก์ท็อปหรือเมนู Start ได้เลย (ไม่มีหน้าต่าง cmd) สร้างทางลัดใหม่ได้ที่ **เมนู > สร้างทางลัดบนเดสก์ท็อป** หรือจะใช้ `cargo run` / `cargo build --release` ตรง ๆ ก็ได้
 
 จะนำ `tadtor.exe` ไปใช้เครื่องอื่น ให้วางโฟลเดอร์ `ffmpeg\` (ที่มี `bin\ffmpeg.exe`) ไว้ข้างไฟล์ `.exe`
 
@@ -124,7 +124,8 @@ claude mcp add tadtor -- "C:\path\to\tadtor.exe" --mcp
 
 ```
 src/
-  main.rs              จุดเริ่มโปรแกรม (และโหมด --mcp)
+  main.rs              จุดเริ่มโปรแกรม (และโหมด --mcp, --create-shortcuts)
+  paths.rs             โฟลเดอร์ของโปรแกรม ทางลัดบนเดสก์ท็อป/เมนู Start
   app.rs               สถานะโปรแกรม คำสั่งตัดต่อ คีย์ลัด
   theme.rs             สี ธีมมืด ขนาดตัวอักษร ฟอนต์ไทย
   icons.rs             ไอคอน (ฟอนต์ Phosphor Icons)
