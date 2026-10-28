@@ -7,6 +7,7 @@ pub mod inspector;
 pub mod layout;
 pub mod media_panel;
 pub mod preview;
+pub mod settings_dialog;
 pub mod subtitle_dialog;
 pub mod timeline;
 pub mod tools_panel;

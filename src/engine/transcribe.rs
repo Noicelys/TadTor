@@ -28,7 +28,7 @@ const VAD_NAME: &str = "ggml-silero-v5.1.2.bin";
 /// ขนาดดาวน์โหลดทั้งหมดโดยประมาณ (MB) ไว้บอกผู้ใช้
 pub const DOWNLOAD_MB: u64 = (CLI_ZIP_SIZE + MODEL_SIZE) / 1_000_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Language {
     Thai,
     English,

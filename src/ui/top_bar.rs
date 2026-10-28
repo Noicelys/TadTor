@@ -28,6 +28,18 @@ pub fn show(app: &mut TadTorApp, ui: &mut egui::Ui) {
                         ui.close();
                         app.request(&ctx, PendingAction::OpenProject);
                     }
+                    let recent: Vec<_> = app.settings.recent.iter().filter(|p| p.is_file()).cloned().collect();
+                    ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                        ui.menu_button(format!("{}  เปิดงานล่าสุด", icons::FOLDER_OPEN), |ui| {
+                            for p in recent {
+                                let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                                if ui.button(&name).on_hover_text(p.display().to_string()).clicked() {
+                                    ui.close();
+                                    app.request(&ctx, PendingAction::OpenPath(p));
+                                }
+                            }
+                        });
+                    });
                     if item(ui, &format!("{}  บันทึก", icons::FLOPPY_DISK), "Ctrl+S") {
                         ui.close();
                         app.save(&ctx, false);
@@ -46,13 +58,20 @@ pub fn show(app: &mut TadTorApp, ui: &mut egui::Ui) {
                         app.open_export_dialog(&ctx);
                     }
                     ui.separator();
+                    if item(ui, &format!("{}  การตั้งค่า…", icons::SLIDERS_HORIZONTAL), "Ctrl+,") {
+                        ui.close();
+                        app.settings_open = true;
+                    }
                     ui.menu_button(format!("{}  จัดหน้าจอ", icons::SLIDERS_HORIZONTAL), |ui| {
                         super::layout::menu(app, ui)
                     });
                     if item(ui, &format!("{}  สร้างทางลัดบนเดสก์ท็อป", icons::FILE_PLUS), "") {
                         ui.close();
                         match crate::paths::create_shortcuts() {
-                            Ok(_) => app.notify(&ctx, "สร้างทางลัดบนเดสก์ท็อปและเมนู Start แล้ว"),
+                            Ok(_) => app.notify(
+                                &ctx,
+                                format!("สร้างทางลัดบนเดสก์ท็อปและเมนู Start แล้ว • เปิดโปรแกรมได้ด้วย {}", crate::paths::HOTKEY_LABEL),
+                            ),
                             Err(e) => app.notify(&ctx, e),
                         }
                     }
@@ -63,10 +82,41 @@ pub fn show(app: &mut TadTorApp, ui: &mut egui::Ui) {
                     }
                 });
 
-                // ชื่อโปรเจกต์ตรงกลาง (มีจุดถ้ายังไม่ได้บันทึก)
+                // ชื่อโปรเจกต์ตรงกลาง (มีจุดถ้ายังไม่ได้บันทึก) และบอกว่าบันทึกล่าสุดเมื่อไร
                 let name = if app.dirty { format!("{} •", app.project.name) } else { app.project.name.clone() };
                 let center = ui.max_rect().center();
-                ui.painter().text(center, egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(14.0), theme::TEXT_DIM);
+                let status = match (app.last_saved, app.dirty) {
+                    (Some(t), _) => {
+                        let min = t.elapsed().as_secs() / 60;
+                        if min == 0 {
+                            "บันทึกแล้วเมื่อสักครู่".to_owned()
+                        } else {
+                            format!("บันทึกล่าสุด {min} นาทีที่แล้ว")
+                        }
+                    }
+                    (None, true) if app.project_path.is_none() => "ยังไม่ได้บันทึก".to_owned(),
+                    _ => String::new(),
+                };
+                // มีบรรทัดสถานะ: ชื่อขยับขึ้นให้สองบรรทัดอยู่กลางแถบพอดี
+                let name_y = if status.is_empty() { 0.0 } else { -7.0 };
+                ui.painter().text(
+                    center + egui::vec2(0.0, name_y),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    egui::FontId::proportional(14.0),
+                    theme::TEXT_DIM,
+                );
+                if !status.is_empty() {
+                    let pos = center + egui::vec2(0.0, 10.0);
+                    ui.painter().text(
+                        pos,
+                        egui::Align2::CENTER_CENTER,
+                        status,
+                        egui::FontId::proportional(11.5),
+                        theme::TEXT_DIM.gamma_multiply(0.8),
+                    );
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(30));
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let export = egui::Button::new(RichText::new(format!("{}  ส่งออก", icons::EXPORT)).color(egui::Color32::BLACK).strong())

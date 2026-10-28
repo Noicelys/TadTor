@@ -78,6 +78,8 @@ pub enum PendingAction {
     Close,
     NewProject,
     OpenProject,
+    /// เปิดงานจากรายการงานล่าสุด
+    OpenPath(PathBuf),
 }
 
 /// ประเภทคลิปที่คำสั่งต้องการ
@@ -139,8 +141,16 @@ pub struct TadTorApp {
 
     pub export_dialog: Option<ui::export_dialog::ExportDialog>,
     pub export_job: Option<ExportJob>,
-    /// ตั้งค่าซับอัตโนมัติ (จำไว้ตลอดที่เปิดโปรแกรม)
-    pub subtitle_settings: ui::subtitle_dialog::SubtitleSettings,
+    /// การตั้งค่าโปรแกรม (จำไว้ใน settings.json) และสำเนาล่าสุดที่บันทึกลงไฟล์แล้ว
+    pub settings: crate::settings::Settings,
+    settings_saved: crate::settings::Settings,
+    pub settings_open: bool,
+    /// ตอนเปิดโปรแกรมพบงานที่ยังไม่ได้บันทึกจากครั้งก่อน
+    pub recovery_prompt: bool,
+    /// เวลาที่เริ่มมีการแก้ที่ยังไม่บันทึก (ใช้นับเวลาบันทึกอัตโนมัติ)
+    dirty_since: Option<std::time::Instant>,
+    /// บันทึกงานลงไฟล์ครั้งล่าสุด
+    pub last_saved: Option<std::time::Instant>,
     /// ซับอัตโนมัติที่กำลังถอดอยู่ รอใส่ผลลงไทม์ไลน์
     pub subtitle_dialog: Option<ui::subtitle_dialog::SubtitleRun>,
     pub transcribe_job: Option<TranscribeJob>,
@@ -159,8 +169,9 @@ impl TadTorApp {
         theme::load_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         let ffmpeg = FfmpegProbe::start(cc.egui_ctx.clone());
+        let settings = crate::settings::load();
         let mut app = Self {
-            project: Project::default(),
+            project: settings.new_project.project(),
             library: MediaLibrary::default(),
             jobs: MediaJobs::start(cc.egui_ctx.clone(), ffmpeg.clone()),
             ffmpeg,
@@ -193,7 +204,12 @@ impl TadTorApp {
             allow_close: false,
             export_dialog: None,
             export_job: None,
-            subtitle_settings: Default::default(),
+            settings: settings.clone(),
+            settings_saved: settings,
+            settings_open: false,
+            recovery_prompt: false,
+            dirty_since: None,
+            last_saved: None,
             subtitle_dialog: None,
             transcribe_job: None,
             mcp: crate::mcp::McpState::start(cc.egui_ctx.clone()),
@@ -203,10 +219,14 @@ impl TadTorApp {
         };
         cc.egui_ctx.set_zoom_factor(app.layout.ui_zoom);
         // เปิดไฟล์โปรเจกต์ที่ส่งมาทางบรรทัดคำสั่ง (เช่น ดับเบิลคลิกไฟล์ .tadtor)
-        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
-            if path.extension().is_some_and(|e| e == project_file::EXTENSION) {
-                app.open_project_path(&cc.egui_ctx, &path);
-            }
+        // ไม่งั้น: มีงานค้างจากครั้งก่อนที่ปิดกะทันหัน = ถามกู้คืน, หรือเปิดงานล่าสุด
+        let arg = std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.extension().is_some_and(|e| e == project_file::EXTENSION));
+        if let Some(path) = arg {
+            app.open_project_path(&cc.egui_ctx, &path);
+        } else if crate::settings::recovery_file().is_file() {
+            app.recovery_prompt = true;
+        } else if let Some(last) = app.settings.recent.first().filter(|p| app.settings.open_last_project && p.is_file()).cloned() {
+            app.open_project_path(&cc.egui_ctx, &last);
         }
         app
     }
@@ -553,7 +573,7 @@ impl TadTorApp {
     }
 
     pub fn preview_spec(&self) -> VideoSpec {
-        let (width, height) = self.project.aspect.resolution(540);
+        let (width, height) = self.project.aspect.resolution(self.settings.preview.short_side());
         VideoSpec { width, height, fps: self.project.fps.min(30) }
     }
 
@@ -687,6 +707,7 @@ impl TadTorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             PendingAction::NewProject => self.reset_project(),
+            PendingAction::OpenPath(p) => self.open_project_path(ctx, &p),
             PendingAction::OpenProject => {
                 let picked =
                     rfd::FileDialog::new().set_title("เปิดโปรเจกต์").add_filter("โปรเจกต์ TadTor", &[project_file::EXTENSION]).pick_file();
@@ -699,7 +720,10 @@ impl TadTorApp {
 
     fn reset_project(&mut self) {
         self.stop_playback();
-        self.project = Project::default();
+        self.project = self.settings.new_project.project();
+        // ผู้ใช้เลือกแล้วว่าจะบันทึกหรือทิ้งงานเดิม ไฟล์สำรองไม่ต้องใช้แล้ว
+        let _ = std::fs::remove_file(crate::settings::recovery_file());
+        self.last_saved = None;
         self.library = MediaLibrary::default();
         self.timeline = Timeline::default();
         self.history.clear();
@@ -727,6 +751,7 @@ impl TadTorApp {
                 self.add_media_quiet(media);
                 self.project_path = Some(path.to_path_buf());
                 self.dirty = false;
+                self.settings.remember(path);
                 let missing = self.timeline.main.iter().chain(self.timeline.audio.iter()).filter(|c| !c.path.exists()).count();
                 if missing > 0 {
                     self.notify(ctx, format!("เปิดโปรเจกต์แล้ว แต่หาไฟล์ไม่เจอ {missing} คลิป (ถูกย้ายหรือลบ)"));
@@ -736,6 +761,48 @@ impl TadTorApp {
             }
             Err(e) => self.notify(ctx, format!("เปิดโปรเจกต์ไม่ได้: {e}")),
         }
+    }
+
+    /// กู้คืนงานจากไฟล์สำรอง (เป็นงานที่ยังไม่เคยบันทึก จึงไม่มีที่อยู่ไฟล์)
+    pub fn restore_recovery(&mut self, ctx: &egui::Context) {
+        let file = crate::settings::recovery_file();
+        let recent = self.settings.recent.clone();
+        self.open_project_path(ctx, &file);
+        // ไฟล์สำรองไม่ใช่งานของผู้ใช้ ไม่ต้องจำไว้ในงานล่าสุด และต้องถามที่บันทึกตอนกด Ctrl+S
+        self.settings.recent = recent;
+        self.project_path = None;
+        self.dirty = true;
+        self.notify(ctx, "กู้คืนงานแล้ว อย่าลืมบันทึก (Ctrl+S)");
+    }
+
+    /// บันทึกอัตโนมัติ: งานที่มีไฟล์แล้วบันทึกทับ งานที่ยังไม่เคยบันทึกเก็บเป็นไฟล์สำรอง
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if !self.dirty || !self.settings.autosave {
+            self.dirty_since = None;
+            return;
+        }
+        let since = *self.dirty_since.get_or_insert_with(std::time::Instant::now);
+        let every = std::time::Duration::from_secs(self.settings.autosave_minutes.clamp(1, 60) as u64 * 60);
+        let waited = since.elapsed();
+        // ไม่บันทึกระหว่างลากแก้ค่า หรือมีหน้าต่างถามค้างอยู่
+        if waited < every || self.drag_origin.is_some() || self.pending.is_some() {
+            ctx.request_repaint_after(every.saturating_sub(waited).max(std::time::Duration::from_secs(1)));
+            return;
+        }
+        let media = self.library.items.iter().map(|it| it.path.clone()).collect();
+        match self.project_path.clone() {
+            Some(path) => {
+                if project_file::save(&path, &self.project, media, &self.timeline).is_ok() {
+                    self.dirty = false;
+                    self.last_saved = Some(std::time::Instant::now());
+                }
+            }
+            None => {
+                let _ = std::fs::create_dir_all(crate::settings::dir());
+                let _ = project_file::save(&crate::settings::recovery_file(), &self.project, media, &self.timeline);
+            }
+        }
+        self.dirty_since = None;
     }
 
     /// บันทึก คืน true ถ้าบันทึกสำเร็จ (`save_as` = ถามที่เก็บไฟล์ใหม่เสมอ)
@@ -758,8 +825,11 @@ impl TadTorApp {
         let media = self.library.items.iter().map(|it| it.path.clone()).collect();
         match project_file::save(&path, &self.project, media, &self.timeline) {
             Ok(()) => {
+                self.settings.remember(&path);
                 self.project_path = Some(path);
                 self.dirty = false;
+                self.last_saved = Some(std::time::Instant::now());
+                let _ = std::fs::remove_file(crate::settings::recovery_file());
                 self.notify(ctx, "บันทึกแล้ว");
                 true
             }
@@ -787,6 +857,8 @@ impl TadTorApp {
         // ไม่รับคีย์ลัดตอนกำลังพิมพ์ในช่องข้อความ หรือมีหน้าต่างถามค้างอยู่
         if ctx.egui_wants_keyboard_input()
             || self.pending.is_some()
+            || self.settings_open
+            || self.recovery_prompt
             || self.export_dialog.is_some()
             || self.subtitle_dialog.is_some()
             || self.transcribe_job.is_some()
@@ -821,6 +893,9 @@ impl TadTorApp {
         }
         if k(cmd, Key::I) {
             self.import_dialog(ctx);
+        }
+        if k(cmd, Key::Comma) {
+            self.settings_open = true;
         }
         if k(Modifiers::NONE, Key::T) {
             self.add_text(TextStyle::default());
@@ -923,12 +998,21 @@ impl eframe::App for TadTorApp {
         ui::dialogs::show(self, &ctx);
         ui::export_dialog::show(self, &ctx);
         ui::subtitle_dialog::show(self, &ctx);
+        ui::settings_dialog::show(self, &ctx);
         crate::mcp::poll(self, &ctx);
+        self.autosave(&ctx);
+        if self.settings != self.settings_saved {
+            crate::settings::save(&self.settings);
+            self.settings_saved = self.settings.clone();
+        }
         self.show_toast(ui);
     }
 
     fn on_exit(&mut self) {
         crate::mcp::control::remove_info();
+        // ปิดปกติ = ผู้ใช้บันทึกหรือเลือกทิ้งงานแล้ว (ปิดกะทันหันจะไม่มาถึงตรงนี้ ไฟล์สำรองจึงยังอยู่)
+        let _ = std::fs::remove_file(crate::settings::recovery_file());
+        crate::settings::save(&self.settings);
         self.stop_playback();
         if let Some(job) = &self.transcribe_job {
             job.cancel();

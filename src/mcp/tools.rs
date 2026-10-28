@@ -605,11 +605,11 @@ fn auto_subtitles(app: &mut TadTorApp, ctx: &egui::Context, a: &Value) -> Outcom
         include_music: a["include_music"].as_bool().unwrap_or(false),
         from: opt_num(a, "from").unwrap_or(0.0).clamp(0.0, total),
         until: opt_num(a, "until").unwrap_or(total).clamp(0.0, total),
-        max_len: a["max_chars"].as_u64().unwrap_or(app.subtitle_settings.max_len as u64) as u32,
+        max_len: a["max_chars"].as_u64().unwrap_or(app.settings.subtitles.max_len as u64) as u32,
         prompt: a["prompt"].as_str().unwrap_or_default().to_owned(),
     };
     let presets = TextStyle::presets();
-    let style = presets.get(app.subtitle_settings.style).map_or_else(|| TextStyle::subtitle(String::new()), |p| p.1.clone());
+    let style = presets.get(app.settings.subtitles.style).map_or_else(|| TextStyle::subtitle(String::new()), |p| p.1.clone());
     match crate::ui::subtitle_dialog::start_job(app, ctx, opts, style) {
         Ok(()) => Outcome::Wait(Pending::Subtitles),
         Err(e) => Done(Err(e)),

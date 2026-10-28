@@ -11,7 +11,7 @@ use crate::engine::transcribe::{self, Language, TranscribeJob, TranscribeOptions
 use crate::{icons, theme};
 
 /// ช่วงเวลาที่จะถอดเสียง
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Range {
     All,
     Selected,
@@ -30,6 +30,8 @@ impl Range {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SubtitleSettings {
     pub language: Language,
     pub include_music: bool,
@@ -80,7 +82,7 @@ fn start(app: &mut TadTorApp, ctx: &egui::Context) {
         app.notify(ctx, "ยังไม่มีคลิปให้ถอดเสียง");
         return;
     }
-    let s = &app.subtitle_settings;
+    let s = &app.settings.subtitles;
     let Some((from, until)) = range_span(app, s.range) else {
         let msg = if s.range == Range::Selected {
             "คลิกเลือกคลิปในไทม์ไลน์ก่อน"
@@ -151,8 +153,8 @@ fn auto_section(app: &mut TadTorApp, ui: &mut egui::Ui) {
     hint(ui, "ฟังเสียงพูดแล้วพิมพ์เป็นซับให้ ทำงานในเครื่องนี้ทั้งหมด ไม่ส่งไฟล์ขึ้นอินเทอร์เน็ต");
     ui.add_space(4.0);
 
-    let span = range_span(app, app.subtitle_settings.range);
-    let s = &mut app.subtitle_settings;
+    let span = range_span(app, app.settings.subtitles.range);
+    let s = &mut app.settings.subtitles;
     row(ui, "ภาษาที่พูด", |ui| {
         egui::ComboBox::from_id_salt("sub_lang").selected_text(s.language.label()).show_ui(ui, |ui| {
             for l in Language::ALL {

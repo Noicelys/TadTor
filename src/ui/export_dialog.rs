@@ -26,9 +26,11 @@ pub struct ExportDialog {
 impl ExportDialog {
     pub fn new(app: &TadTorApp) -> Self {
         let dir = app
-            .project_path
-            .as_ref()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .settings
+            .export_dir
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(|| app.project_path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
             .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Videos")))
             .filter(|d| d.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());

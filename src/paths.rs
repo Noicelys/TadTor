@@ -26,7 +26,10 @@ fn shortcut_target() -> Result<PathBuf, String> {
     })
 }
 
-/// สร้าง/อัปเดตทางลัด "TadTor" บนเดสก์ท็อปและในเมนู Start
+/// ปุ่มลัดเปิดโปรแกรมจากที่ไหนก็ได้ (ตั้งไว้ที่ทางลัดในเมนู Start)
+pub const HOTKEY_LABEL: &str = "Ctrl + Alt + T";
+
+/// สร้าง/อัปเดตทางลัด "TadTor" บนเดสก์ท็อปและในเมนู Start พร้อมปุ่มลัด Ctrl + Alt + T
 #[cfg(windows)]
 pub fn create_shortcuts() -> Result<(), String> {
     // ส่งที่อยู่ไฟล์ทางตัวแปรแวดล้อม (ชื่อโฟลเดอร์ภาษาไทยไม่ต้อง escape ในสคริปต์)
@@ -44,6 +47,8 @@ pub fn create_shortcuts() -> Result<(), String> {
             $l.WorkingDirectory = $env:TADTOR_DIR
             $l.Description = 'TadTor video editor'
             $l.SetIconLocation($env:TADTOR_EXE, 0)
+            # ปุ่มลัดตั้งที่เดียวพอ (ซ้ำสองที่ Windows จะสับสน): Ctrl+Alt = 0x06 ไบต์บน, T = 0x54
+            if ($d -eq [Environment]::GetFolderPath('Programs')) { $l.Hotkey = 0x654 }
             $l.Save()
         }";
     let target = shortcut_target()?;

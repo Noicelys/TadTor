@@ -9,6 +9,7 @@ mod fonts;
 mod icons;
 mod mcp;
 mod paths;
+mod settings;
 mod theme;
 mod ui;
 
