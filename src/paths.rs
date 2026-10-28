@@ -29,7 +29,8 @@ fn shortcut_target() -> Result<PathBuf, String> {
 /// ปุ่มลัดเปิดโปรแกรมจากที่ไหนก็ได้ (ตั้งไว้ที่ทางลัดในเมนู Start)
 pub const HOTKEY_LABEL: &str = "Ctrl + Alt + T";
 
-/// สร้าง/อัปเดตทางลัด "TadTor" บนเดสก์ท็อปและในเมนู Start พร้อมปุ่มลัด Ctrl + Alt + T
+/// สร้าง/อัปเดตทางลัด "TadTor" บนเดสก์ท็อป ในเมนู Start (พร้อมปุ่มลัด Ctrl + Alt + T)
+/// และในโฟลเดอร์โปรแกรม (ถ้าตัวโปรแกรมอยู่โฟลเดอร์อื่น เช่น target\release)
 #[cfg(windows)]
 pub fn create_shortcuts() -> Result<(), String> {
     // ส่งที่อยู่ไฟล์ทางตัวแปรแวดล้อม (ชื่อโฟลเดอร์ภาษาไทยไม่ต้อง escape ในสคริปต์)
@@ -50,12 +51,20 @@ pub fn create_shortcuts() -> Result<(), String> {
             # ปุ่มลัดตั้งที่เดียวพอ (ซ้ำสองที่ Windows จะสับสน): Ctrl+Alt = 0x06 ไบต์บน, T = 0x54
             if ($d -eq [Environment]::GetFolderPath('Programs')) { $l.Hotkey = 0x654 }
             $l.Save()
+        }
+        # คัดลอกทางลัดจากเดสก์ท็อป (ไม่มีปุ่มลัด) ไปไว้ในโฟลเดอร์โปรแกรม
+        if ($env:TADTOR_FOLDER) {
+            Copy-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) 'TadTor.lnk') `
+                -Destination (Join-Path $env:TADTOR_FOLDER 'TadTor.lnk') -Force
         }";
     let target = shortcut_target()?;
+    // ตัวโปรแกรมอยู่ในโฟลเดอร์โปรแกรมอยู่แล้ว ไม่ต้องมีทางลัดซ้ำข้าง ๆ
+    let folder = if target.parent() == Some(app_dir().as_path()) { PathBuf::new() } else { app_dir() };
     let out = crate::ffmpeg::command(Path::new("powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
         .env("TADTOR_EXE", &target)
         .env("TADTOR_DIR", app_dir())
+        .env("TADTOR_FOLDER", folder)
         .output()
         .map_err(|e| format!("เรียก PowerShell ไม่ได้: {e}"))?;
     if !out.status.success() {
